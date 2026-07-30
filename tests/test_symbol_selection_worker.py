@@ -25,7 +25,8 @@ class FakeCore:
 
     def fetch_candles(self, symbol, interval, limit=80):
         assert interval == "60"
-        bullish = int(symbol.replace("S", "").replace("USDT", "")) % 2 == 0
+        sequence = int(symbol.removeprefix("S").removesuffix("USDT"))
+        bullish = sequence % 2 == 0
         closes = [100 + index * 0.5 for index in range(80)]
         if not bullish:
             closes = list(reversed(closes))
@@ -58,6 +59,7 @@ def reset_state():
             "lastBatchAt": 0,
             "lastFullCycleAt": 0,
             "lastError": None,
+            "lastBatch": {},
         }
     )
 
