@@ -41,6 +41,7 @@ def test_strong_only_gate_uses_current_evaluation_votes(monkeypatch):
     class Engine:
         def __init__(self):
             self.status = None
+            self.market_data = SimpleNamespace(snapshot=lambda symbol: {})
 
         def set_status(self, name, value):
             self.status = (name, value)
