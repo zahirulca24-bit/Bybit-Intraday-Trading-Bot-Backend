@@ -1,6 +1,6 @@
 """Cloud Run environment and runtime readiness checks.
 
-The module never exposes secret values.  Configuration is validated only when
+The module never exposes secret values. Configuration is validated only when
 ``require_environment`` or ``environment_status`` is called, so importing the
 runtime remains safe for build-time smoke tests.
 """
@@ -167,41 +167,69 @@ def liveness_payload() -> dict[str, Any]:
     }
 
 
+def _public_durable_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": bool(status.get("ok")),
+        "backend": str(status.get("backend") or "postgresql"),
+        "degraded": bool(status.get("degraded")),
+        "restartSafe": bool(status.get("restartSafe")),
+        "persistentPathConfigured": bool(status.get("persistentPathConfigured")),
+        "migrationVersion": int(status.get("migrationVersion") or 0),
+    }
+
+
+def _public_leadership_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": str(status.get("status") or "unknown"),
+        "leader": bool(status.get("leader")),
+    }
+
+
+def _public_worker_status(status: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "status": str(status.get("status") or "unknown"),
+        "threadAlive": bool(status.get("threadAlive")),
+    }
+
+
 def runtime_readiness(core: Any, instance_guard: Any, orchestrator: Any) -> dict[str, Any]:
-    """Return API readiness without requiring this instance to be the leader."""
+    """Return public API readiness without exposing internal connection errors."""
     environment = environment_status()
     try:
-        durable = dict(core.durable_state_status() or {})
-    except Exception as exc:
-        durable = {"ok": False, "degraded": True, "error": str(exc)}
+        durable_internal = dict(core.durable_state_status() or {})
+    except Exception:
+        durable_internal = {"ok": False, "degraded": True}
     try:
-        leadership = dict(instance_guard.snapshot() or {})
-    except Exception as exc:
-        leadership = {"status": "error", "leader": False, "reason": str(exc)}
+        leadership_internal = dict(instance_guard.snapshot() or {})
+    except Exception:
+        leadership_internal = {"status": "error", "leader": False}
     try:
-        workers = dict(orchestrator.snapshot() or {})
-    except Exception as exc:
-        workers = {"status": "error", "lastError": str(exc)}
+        workers_internal = dict(orchestrator.snapshot() or {})
+    except Exception:
+        workers_internal = {"status": "error", "threadAlive": False}
 
-    durable_ready = bool(durable.get("ok")) and not bool(durable.get("degraded"))
-    leadership_status = str(leadership.get("status") or "unknown")
-    api_instance_ready = leadership_status in {"leader", "standby"}
+    durable = _public_durable_status(durable_internal)
+    leadership = _public_leadership_status(leadership_internal)
+    workers = _public_worker_status(workers_internal)
+
+    durable_ready = bool(durable["ok"]) and not bool(durable["degraded"])
+    api_instance_ready = leadership["status"] in {"leader", "standby"}
     ready = bool(environment.get("ok")) and durable_ready and api_instance_ready
 
     reasons: list[str] = []
     if not environment.get("ok"):
         reasons.extend(environment.get("errors") or [])
     if not durable_ready:
-        reasons.append(str(durable.get("error") or "Persistent PostgreSQL state is not ready."))
+        reasons.append("Persistent PostgreSQL state is not ready.")
     if not api_instance_ready:
-        reasons.append(str(leadership.get("reason") or "Runtime leadership state is not ready."))
+        reasons.append("Runtime leadership state is not ready.")
 
     return {
         "ok": ready,
         "status": "ready" if ready else "not_ready",
         "demoOnly": True,
-        "executionLeader": bool(leadership.get("leader")),
-        "executionReady": ready and bool(leadership.get("leader")),
+        "executionLeader": leadership["leader"],
+        "executionReady": ready and leadership["leader"],
         "reasons": reasons,
         "environment": environment,
         "durableState": durable,
