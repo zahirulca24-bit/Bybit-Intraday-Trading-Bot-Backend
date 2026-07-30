@@ -1,0 +1,80 @@
+name: Authoritative Daily Risk CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/authoritative_daily_risk.py"
+      - "backend/batch1_safety.py"
+      - "backend/secure_server.py"
+      - "backend/live_execution_ledger.py"
+      - "backend/tests/test_authoritative_daily_risk.py"
+      - ".github/workflows/authoritative-daily-risk-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/authoritative_daily_risk.py"
+      - "backend/batch1_safety.py"
+      - "backend/secure_server.py"
+      - "backend/live_execution_ledger.py"
+      - "backend/tests/test_authoritative_daily_risk.py"
+      - ".github/workflows/authoritative-daily-risk-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  authoritative-daily-risk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile policy and canonical runtime
+        run: |
+          python -m compileall -q \
+            backend/authoritative_daily_risk.py \
+            backend/batch1_safety.py \
+            backend/secure_server.py
+
+      - name: Run daily-risk contract tests
+        run: python -m pytest backend/tests/test_authoritative_daily_risk.py -q
+
+      - name: Verify canonical install order and no trade-count lock
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          policy_source = Path("backend/authoritative_daily_risk.py").read_text(encoding="utf-8")
+          secure_source = Path("backend/secure_server.py").read_text(encoding="utf-8")
+          tree = ast.parse(policy_source)
+
+          ledger_install = secure_source.index("live_execution_ledger.install(core)")
+          policy_install = secure_source.index("authoritative_daily_risk.install(core)")
+          assert ledger_install < policy_install
+
+          assert '"tradeCountLimitEnabled": False' in policy_source
+          assert '"maxTradesPerDay": None' in policy_source
+          assert '"legacyTradeGateActive": False' in policy_source
+          assert "count_today_accepted_orders" not in policy_source
+          assert "trades_today >=" not in policy_source
+
+          function_names = {
+              node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+          }
+          assert {"evaluate", "debug_report", "install"}.issubset(function_names)
+          PY

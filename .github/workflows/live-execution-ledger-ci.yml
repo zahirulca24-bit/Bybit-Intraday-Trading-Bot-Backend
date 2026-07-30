@@ -1,0 +1,124 @@
+name: Live Execution Ledger CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/live_execution_ledger.py"
+      - "backend/live_execution_storage.py"
+      - "backend/secure_server.py"
+      - "backend/postgres_state_store.py"
+      - "backend/tests/test_live_execution_ledger.py"
+      - "backend/tests/live_execution_ledger_postgres_check.py"
+      - ".github/workflows/live-execution-ledger-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/live_execution_ledger.py"
+      - "backend/live_execution_storage.py"
+      - "backend/secure_server.py"
+      - "backend/postgres_state_store.py"
+      - "backend/tests/test_live_execution_ledger.py"
+      - "backend/tests/live_execution_ledger_postgres_check.py"
+      - ".github/workflows/live-execution-ledger-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  live-execution-ledger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ledger
+          POSTGRES_PASSWORD: ledger
+          POSTGRES_DB: live_execution_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ledger -d live_execution_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://ledger:ledger@localhost:5432/live_execution_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile canonical runtime
+        run: |
+          python -m compileall -q \
+            backend/live_execution_ledger.py \
+            backend/live_execution_storage.py \
+            backend/secure_server.py \
+            backend/postgres_state_store.py
+
+      - name: Run execution truth unit tests
+        run: python -m pytest backend/tests/test_live_execution_ledger.py -q
+
+      - name: Verify PostgreSQL migration idempotency and ENA partial close
+        run: python -m backend.tests.live_execution_ledger_postgres_check
+
+      - name: Verify read-only Bybit boundary
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          path = Path("backend/live_execution_ledger.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source)
+
+          for token in (
+              "/v5/order/create",
+              "/v5/order/cancel",
+              "/v5/position/trading-stop",
+              "place_demo_order",
+              "close_symbol_positions",
+          ):
+              assert token not in source, token
+
+          calls = []
+          for node in ast.walk(tree):
+              if not isinstance(node, ast.Call):
+                  continue
+              func = node.func
+              if isinstance(func, ast.Attribute) and func.attr == "bybit_request":
+                  calls.append(node)
+          assert calls, "The ledger must read canonical Bybit account truth."
+          for call in calls:
+              assert call.args, ast.dump(call)
+              first = call.args[0]
+              assert isinstance(first, ast.Constant) and first.value == "GET", ast.dump(call)
+          PY
+
+      - name: Verify central migration version
+        run: |
+          python - <<'PY'
+          from backend.live_execution_storage import LIVE_EXECUTION_MIGRATION
+          from backend.postgres_state_store import MIGRATIONS
+          from backend import live_execution_ledger
+
+          versions = [version for version, _ in MIGRATIONS]
+          assert versions == sorted(set(versions)), versions
+          assert LIVE_EXECUTION_MIGRATION in MIGRATIONS
+          assert live_execution_ledger.SCHEMA_VERSION == max(versions) == 4
+          PY

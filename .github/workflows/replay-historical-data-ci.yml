@@ -1,0 +1,166 @@
+name: Replay Historical Data CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/replay_collector.py"
+      - "backend/replay_safety.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_collector.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-historical-data-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/replay_collector.py"
+      - "backend/replay_safety.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_collector.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-historical-data-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  replay-historical-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: replay
+          POSTGRES_PASSWORD: replay
+          POSTGRES_DB: replay_collector_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replay -d replay_collector_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replay:replay@localhost:5432/replay_collector_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile replay collector runtime
+        run: >-
+          python -m compileall -q
+          backend/replay_collector.py
+          backend/replay_safety.py
+          backend/secure_server.py
+
+      - name: Run replay collector safety tests
+        run: >-
+          python -m pytest
+          backend/tests/test_replay_collector.py
+          tests/test_replay_safety.py
+          -q
+
+      - name: Verify PostgreSQL cache sync and cache reuse
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import time
+
+          from backend.postgres_state_store import PostgresStateStore
+          from backend.replay_collector import HistoricalKlineCollector, INTERVAL_MS
+
+
+          class FakeBybitTransport:
+              def __init__(self, rows):
+                  self.rows = rows
+                  self.calls = []
+
+              def get_kline(self, params):
+                  params = dict(params)
+                  self.calls.append(params)
+                  rows = [
+                      row
+                      for row in self.rows
+                      if int(params["start"]) <= int(row[0]) <= int(params["end"])
+                  ]
+                  rows.sort(key=lambda row: int(row[0]), reverse=True)
+                  return {
+                      "retCode": 0,
+                      "retMsg": "OK",
+                      "result": {"list": rows[: int(params["limit"])]},
+                  }
+
+
+          interval = INTERVAL_MS["5"]
+          now_ms = int(time.time() * 1000)
+          last_closed = (now_ms // interval) * interval - interval
+          start = last_closed - (4 * interval)
+          rows = [
+              [
+                  str(start + (index * interval)),
+                  "100",
+                  str(102 + index),
+                  "99",
+                  str(100 + index),
+                  "25",
+                  "2510",
+              ]
+              for index in range(5)
+          ]
+
+          store = PostgresStateStore()
+          status = store.status()
+          assert status["ok"] is True, status
+          assert status["migrationVersion"] >= 2, status
+
+          transport = FakeBybitTransport(rows)
+          collector = HistoricalKlineCollector(
+              store,
+              transport=transport,
+              page_limit=2,
+              min_request_interval_seconds=0,
+              now_ms=lambda: now_ms,
+          )
+          request = {
+              "symbol": "BTCUSDT",
+              "timeframe": "5",
+              "startTime": start,
+              "endTime": last_closed,
+          }
+
+          first = collector.sync(request)
+          assert first["ok"] is True, first
+          assert first["source"] == "bybit_main_public_kline", first
+          assert first["pages"] == 3, first
+          assert first["range"]["complete"] is True, first
+          assert first["range"]["cachedCandles"] == 5, first
+          calls_after_first = len(transport.calls)
+
+          second = collector.sync(request)
+          assert second["ok"] is True, second
+          assert second["source"] == "postgresql_cache", second
+          assert second["pages"] == 0, second
+          assert len(transport.calls) == calls_after_first
+
+          candles = store.get_replay_candles("BTCUSDT", "5", start, last_closed)
+          assert len(candles) == 5, candles
+          assert [item["openTime"] for item in candles] == [
+              start + (index * interval) for index in range(5)
+          ]
+          PY

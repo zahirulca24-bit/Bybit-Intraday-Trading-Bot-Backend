@@ -1,0 +1,2656 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bybit Demo Intraday Bot Control Center</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b10;
+      --panel: #10151d;
+      --panel-2: #151b24;
+      --line: #263140;
+      --text: #eef3f8;
+      --muted: #93a0ad;
+      --green: #00ff66;
+      --red: #ff5b6e;
+      --yellow: #f2c94c;
+      --blue: #54a3ff;
+      --cyan: #00f0ff;
+      --orange: #f59f00;
+      --shadow: 0 18px 45px rgba(0, 0, 0, .28);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow-x: hidden;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 12% 0%, rgba(84, 163, 255, .18), transparent 32rem),
+        radial-gradient(circle at 86% 8%, rgba(39, 209, 127, .13), transparent 26rem),
+        linear-gradient(180deg, rgba(8, 17, 29, .65), rgba(3, 7, 11, .96)),
+        var(--bg);
+      color: var(--text);
+    }
+
+    button, input, select {
+      font: inherit;
+    }
+
+    button {
+      border: 0;
+      color: inherit;
+      cursor: pointer;
+    }
+
+    .shell {
+      width: 100%;
+      margin: 0 auto;
+      padding: 14px 18px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 18px;
+      align-items: center;
+      padding: 12px 16px;
+      border: 1px solid var(--line);
+      background: linear-gradient(135deg, rgba(16, 28, 44, .9), rgba(12, 18, 28, .88));
+      box-shadow: var(--shadow);
+      border-radius: 8px;
+    }
+
+    .brand {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .mark {
+      width: 46px;
+      height: 46px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--yellow), #ec8f26);
+      color: #15100a;
+      font-weight: 800;
+      flex: 0 0 auto;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.35rem, 2.2vw, 2.15rem);
+      letter-spacing: 0;
+      line-height: 1.05;
+    }
+
+    .subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: .94rem;
+    }
+
+    .status-strip {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      border-radius: 999px;
+      color: var(--muted);
+      white-space: nowrap;
+      font-size: .9rem;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 0 5px rgba(39, 209, 127, .13);
+    }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: minmax(330px, 24vw) minmax(680px, 1fr) minmax(360px, 26vw);
+      gap: 12px;
+      margin-top: 12px;
+      align-items: stretch;
+      min-height: calc(100vh - 232px);
+    }
+
+    body.dashboard-view .main-grid {
+      grid-template-columns: minmax(720px, 1fr) minmax(380px, 26vw);
+    }
+
+    body.control-view .main-grid {
+      grid-template-columns: minmax(520px, 34vw) minmax(720px, 1fr);
+    }
+
+    body.dashboard-view .control-col,
+    body.dashboard-view .execution-panel,
+    body.control-view .dashboard-only,
+    body.control-view .market-panel,
+    body.control-view .center-col,
+    body.control-view .health-strip {
+      display: none;
+    }
+
+    body.control-view .right-col {
+      grid-column: auto;
+    }
+
+    body.control-view .control-col {
+      max-width: none;
+    }
+
+    .page-extra {
+      display: none;
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    body.page-scanner .main-grid,
+    body.page-trades .main-grid,
+    body.page-analytics .main-grid,
+    body.page-backtest .main-grid {
+      display: none;
+    }
+
+    body.page-scanner #scannerSignalsPage,
+    body.page-trades #tradesJournalPage,
+    body.page-analytics #analyticsPage,
+    body.page-backtest #backtestPage {
+      display: grid;
+    }
+
+    body.page-scanner .health-strip,
+    body.page-trades .health-strip,
+    body.page-analytics .health-strip,
+    body.page-backtest .health-strip {
+      display: grid;
+    }
+
+    .two-col-page {
+      grid-template-columns: minmax(0, 1.1fr) minmax(360px, .9fr);
+      align-items: start;
+    }
+
+    .three-col-page {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: start;
+    }
+
+    .page-note {
+      color: var(--muted);
+      font-size: .9rem;
+      line-height: 1.5;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(17, 28, 43, .92), rgba(11, 18, 29, .94));
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 15px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(10, 18, 29, .62);
+    }
+
+    h2 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .panel-body {
+      padding: 15px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .page-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .page-tab {
+      min-height: 40px;
+      padding: 9px 14px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(16, 26, 40, .72);
+      color: var(--muted);
+    }
+
+    .page-tab[aria-pressed="true"] {
+      background: rgba(39, 209, 127, .14);
+      color: var(--green);
+      border-color: rgba(39, 209, 127, .35);
+      font-weight: 800;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    label, .label {
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    input, select {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 10px 11px;
+      background: #0c1118;
+      color: var(--text);
+      outline: none;
+    }
+
+    .static-field {
+      min-height: 42px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      padding: 8px 11px;
+      background: #0c1118;
+      display: grid;
+      gap: 3px;
+      align-content: center;
+    }
+
+    .static-field strong {
+      font-size: .92rem;
+    }
+
+    .static-field span {
+      color: var(--muted);
+      font-size: .76rem;
+    }
+
+    .check-line {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin: -2px 0 14px;
+      padding: 10px 11px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #0c1118;
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    .check-line input {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--green);
+      flex: 0 0 auto;
+    }
+
+    input:focus, select:focus, button:focus-visible {
+      outline: 2px solid rgba(84, 163, 255, .62);
+      outline-offset: 2px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .btn-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .btn-row + .btn-row {
+      margin-top: 10px;
+    }
+
+    .btn {
+      min-height: 42px;
+      padding: 10px 12px;
+      border-radius: 7px;
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+      color: var(--text);
+      transition: transform .15s ease, border-color .15s ease, background .15s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      border-color: #3a4a60;
+      background: #1a222e;
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, #1fb36e, #11958d);
+      border-color: rgba(39, 209, 127, .4);
+      color: #06110d;
+      font-weight: 800;
+    }
+
+    .btn.danger {
+      background: linear-gradient(135deg, #d92d4b, #9f1937);
+      border-color: rgba(255, 91, 110, .4);
+      font-weight: 800;
+    }
+
+    .btn.ghost {
+      color: var(--muted);
+    }
+
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric {
+      border: 1px solid var(--line);
+      background: linear-gradient(145deg, rgba(16, 32, 50, .9), rgba(12, 20, 32, .92));
+      border-radius: 8px;
+      padding: 14px 14px 14px 64px;
+      min-height: 104px;
+      position: relative;
+    }
+
+    .metric::before {
+      content: attr(data-icon);
+      position: absolute;
+      left: 16px;
+      top: 26px;
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 8px;
+      background: rgba(84, 163, 255, .14);
+      color: var(--cyan);
+      font-weight: 800;
+    }
+
+    .metric span {
+      display: block;
+      color: var(--muted);
+      font-size: .82rem;
+      margin-bottom: 10px;
+    }
+
+    .metric strong {
+      display: block;
+      font-size: clamp(1.3rem, 2.2vw, 1.85rem);
+      line-height: 1.05;
+    }
+
+    .metric small {
+      display: block;
+      margin-top: 8px;
+      color: var(--green);
+      font-size: .82rem;
+    }
+
+    .negative small { color: var(--red); }
+
+    .chart-wrap {
+      height: clamp(380px, 45vh, 590px);
+      padding: 12px 12px 8px;
+    }
+
+    .chart-meta,
+    .chart-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      padding: 0 15px 12px;
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    .chart-footer {
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+
+    .chart-tools {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .axis, .grid-line {
+      stroke: rgba(147, 160, 173, .18);
+      stroke-width: 1;
+    }
+
+    .price-line {
+      fill: none;
+      stroke: var(--cyan);
+      stroke-width: 3;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .signal-line {
+      fill: none;
+      stroke: var(--yellow);
+      stroke-width: 2;
+      stroke-dasharray: 6 6;
+      opacity: .85;
+    }
+
+    .chart-label {
+      fill: var(--muted);
+      font-size: 12px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 640px;
+    }
+
+    th, td {
+      padding: 11px 10px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: .82rem;
+      font-weight: 600;
+    }
+
+    td {
+      font-size: .92rem;
+    }
+
+    .right { text-align: right; }
+    .green { color: var(--green); }
+    .red { color: var(--red); }
+    .yellow { color: var(--yellow); }
+    .muted { color: var(--muted); }
+
+    .signal-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .signal {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 14px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .coin {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: linear-gradient(135deg, var(--orange), #f7c948);
+      color: #120c02;
+      font-weight: 900;
+      font-size: .86rem;
+    }
+
+    .signal:last-child { border-bottom: 0; }
+
+    .signal strong {
+      display: block;
+      font-size: .94rem;
+    }
+
+    .signal small {
+      color: var(--muted);
+    }
+
+    .tag {
+      padding: 5px 8px;
+      border-radius: 999px;
+      background: rgba(84, 163, 255, .13);
+      color: var(--blue);
+      font-size: .78rem;
+      border: 1px solid rgba(84, 163, 255, .22);
+    }
+
+    .tag.buy {
+      background: rgba(39, 209, 127, .12);
+      color: var(--green);
+      border-color: rgba(39, 209, 127, .24);
+    }
+
+    .tag.sell {
+      background: rgba(255, 91, 110, .12);
+      color: var(--red);
+      border-color: rgba(255, 91, 110, .24);
+    }
+
+    .timeline {
+      display: grid;
+      gap: 12px;
+      max-height: calc(100vh - 520px);
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .event {
+      display: grid;
+      grid-template-columns: 68px 1fr;
+      gap: 10px;
+      align-items: start;
+    }
+
+    .event time {
+      color: var(--muted);
+      font-size: .82rem;
+      padding-top: 2px;
+    }
+
+    .event p {
+      margin: 0;
+      line-height: 1.38;
+      font-size: .9rem;
+    }
+
+    .risk-meter {
+      display: grid;
+      gap: 9px;
+      margin: 4px 0 16px;
+    }
+
+    .meter-bar {
+      height: 12px;
+      border-radius: 999px;
+      background: #0c1118;
+      overflow: hidden;
+      border: 1px solid var(--line);
+    }
+
+    .meter-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--green), var(--yellow));
+      border-radius: inherit;
+    }
+
+    .mode-switch {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+
+    .mode-switch button[aria-pressed="true"] {
+      background: rgba(242, 201, 76, .16);
+      border-color: rgba(242, 201, 76, .42);
+      color: var(--yellow);
+      font-weight: 800;
+    }
+
+    .notice {
+      margin-top: 14px;
+      padding: 11px;
+      border: 1px solid rgba(242, 201, 76, .25);
+      background: rgba(242, 201, 76, .08);
+      border-radius: 8px;
+      color: #ead994;
+      font-size: .86rem;
+      line-height: 1.45;
+    }
+
+    .notice.locked {
+      border-color: rgba(255, 91, 110, .4);
+      background: rgba(255, 91, 110, .12);
+      color: var(--red);
+      font-weight: bold;
+    }
+
+    .auto-state {
+      display: grid;
+      gap: 8px;
+      margin: 12px 0 14px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      background: #0c1118;
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: .86rem;
+      line-height: 1.4;
+    }
+
+    .auto-state strong {
+      color: var(--text);
+    }
+
+    .engine-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 10px;
+    }
+
+    .engine-card {
+      border: 1px solid var(--line);
+      background: #0c1118;
+      border-radius: 7px;
+      padding: 9px;
+      min-height: 74px;
+    }
+
+    .engine-card span {
+      display: block;
+      color: var(--muted);
+      font-size: .78rem;
+      margin-bottom: 5px;
+    }
+
+    .engine-card strong {
+      display: block;
+      color: var(--text);
+      margin-bottom: 5px;
+    }
+
+    .engine-card small {
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .health-strip {
+      display: grid;
+      grid-template-columns: 1.05fr 1fr 1fr 1fr 2fr;
+      gap: 0;
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      background: linear-gradient(135deg, rgba(15, 28, 44, .9), rgba(9, 16, 27, .92));
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .health-item {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 14px 18px;
+      border-right: 1px solid var(--line);
+      min-width: 0;
+    }
+
+    .health-item:last-child {
+      border-right: 0;
+    }
+
+    .health-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: rgba(39, 209, 127, .12);
+      color: var(--green);
+      font-weight: 900;
+      flex: 0 0 auto;
+    }
+
+    .health-item span {
+      display: block;
+      color: var(--muted);
+      font-size: .8rem;
+      margin-bottom: 4px;
+    }
+
+    .health-item strong {
+      display: block;
+      color: var(--text);
+      font-size: .98rem;
+    }
+
+    .lifecycle {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .life-step {
+      display: inline-flex;
+      gap: 7px;
+      align-items: center;
+      color: var(--muted);
+      font-size: .82rem;
+    }
+
+    .life-dot {
+      width: 18px;
+      height: 18px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      border: 1px solid currentColor;
+      color: var(--green);
+      font-size: .72rem;
+    }
+
+    .life-step[data-state="blocked"],
+    .life-step[data-state="rejected"] {
+      color: var(--red);
+    }
+
+    .life-step[data-state="passed"],
+    .life-step[data-state="accepted"],
+    .life-step[data-state="filled"],
+    .life-step[data-state="attached"] {
+      color: var(--green);
+    }
+
+    .life-step[data-state="skipped"],
+    .life-step[data-state="idle"] {
+      color: var(--muted);
+    }
+
+    .empty-state {
+      display: grid;
+      place-items: center;
+      gap: 8px;
+      padding: 42px 16px;
+      color: var(--muted);
+      text-align: center;
+    }
+
+    .empty-state strong {
+      color: var(--text);
+    }
+
+    .exchange-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 15px;
+    }
+
+    .exchange-item {
+      border: 1px solid var(--line);
+      background: #0c1118;
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .exchange-item span {
+      display: block;
+      color: var(--muted);
+      font-size: .8rem;
+      margin-bottom: 6px;
+    }
+
+    .exchange-item strong {
+      display: block;
+      color: var(--text);
+    }
+
+    .footerbar {
+      display: grid;
+      grid-template-columns: 1fr auto auto auto auto;
+      gap: 24px;
+      align-items: center;
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: .86rem;
+    }
+
+    .footerbar strong {
+      color: var(--green);
+    }
+
+    @media (max-width: 1240px) {
+      .main-grid {
+        grid-template-columns: 300px minmax(0, 1fr);
+      }
+
+      .right-col {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .shell { padding: 14px; }
+      .topbar, .main-grid, .right-col {
+        grid-template-columns: 1fr;
+      }
+
+      .two-col-page,
+      .three-col-page {
+        grid-template-columns: 1fr;
+      }
+
+      body.dashboard-view .main-grid,
+      body.control-view .main-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .main-grid {
+        min-height: auto;
+      }
+
+      .chart-wrap {
+        height: 320px;
+      }
+
+      .timeline {
+        max-height: none;
+      }
+
+      .status-strip {
+        justify-content: flex-start;
+      }
+
+      .metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .health-strip,
+      .footerbar,
+      .exchange-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 520px) {
+      .metrics, .split, .btn-row, .mode-switch {
+        grid-template-columns: 1fr;
+      }
+
+      .engine-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .brand {
+        align-items: flex-start;
+      }
+
+      .mark {
+        width: 36px;
+        height: 36px;
+      }
+    }
+  </style>
+</head>
+<body class="dashboard-view page-dashboard">
+  <main class="shell">
+    <section class="topbar" aria-label="Bot overview">
+      <div class="brand">
+        <div class="mark" aria-hidden="true">B</div>
+        <div>
+          <h1>Bybit Demo Intraday Trading Bot</h1>
+          <div class="subtitle">One-page control center for Bybit demo execution, risk control, signals, positions, and logs.</div>
+        </div>
+      </div>
+      <div class="status-strip">
+        <span class="pill"><span class="dot"></span> Bybit demo mode</span>
+        <span class="pill" id="backendStatus">Backend checking...</span>
+        <span class="pill" id="clockPill">Clock loading...</span>
+      </div>
+    </section>
+
+    <nav class="page-tabs" aria-label="Pages">
+      <button class="page-tab" type="button" data-page="dashboard" id="dashboardTab" aria-pressed="true">Dashboard</button>
+      <button class="page-tab" type="button" data-page="scanner" id="scannerTab" aria-pressed="false">Scanner & Signals</button>
+      <button class="page-tab" type="button" data-page="trades" id="tradesTab" aria-pressed="false">Active Trades & Journal</button>
+      <button class="page-tab" type="button" data-page="analytics" id="analyticsTab" aria-pressed="false">Strategy Analytics</button>
+      <button class="page-tab" type="button" data-page="backtest" id="backtestTab" aria-pressed="false">Backtest Replay</button>
+      <button class="page-tab" type="button" data-page="settings" id="controlTab" aria-pressed="false">Settings & Health</button>
+    </nav>
+
+    <section class="health-strip" aria-label="Engine status">
+      <div class="health-item">
+        <div class="health-icon">ECG</div>
+        <div>
+          <span>Engine alive</span>
+          <strong id="engineAlive">Checking</strong>
+        </div>
+      </div>
+      <div class="health-item">
+        <div class="health-icon">LC</div>
+        <div>
+          <span>Last cycle</span>
+          <strong id="lastCycle">Waiting</strong>
+        </div>
+      </div>
+      <div class="health-item">
+        <div class="health-icon">NS</div>
+        <div>
+          <span>Next scan</span>
+          <strong id="nextScan">Waiting</strong>
+        </div>
+      </div>
+      <div class="health-item">
+        <div class="health-icon">MU</div>
+        <div>
+          <span>Market updated</span>
+          <strong id="marketUpdated">Waiting</strong>
+        </div>
+      </div>
+      <div class="health-item">
+        <div>
+          <span>Order lifecycle</span>
+          <div class="lifecycle">
+            <span class="life-step" id="lifeSignal" data-state="idle"><span class="life-dot">1</span>Signal</span>
+            <span class="life-step" id="lifeGuard" data-state="idle"><span class="life-dot">2</span>Guard</span>
+            <span class="life-step" id="lifeOrder" data-state="idle"><span class="life-dot">3</span>Order</span>
+            <span class="life-step" id="lifeStatus" data-state="idle"><span class="life-dot">4</span>Status</span>
+          </div>
+          <div id="lifecycleReason" style="margin-top: 6px; font-size: 0.8rem; color: var(--red); display: none;">
+            Reason: <span id="lifecycleReasonText">-</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="main-grid">
+      <aside class="stack control-col">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Bot controls</h2>
+            <span class="tag">Safe</span>
+          </div>
+          <div class="panel-body">
+            <div class="mode-switch" aria-label="Trading mode">
+              <button class="btn" type="button" aria-pressed="true" id="paperMode">Demo</button>
+              <button class="btn ghost" type="button" aria-pressed="false" id="liveMode">Real locked</button>
+            </div>
+
+            <div class="field">
+              <label for="adminToken">Admin Token</label>
+              <input id="adminToken" type="password" placeholder="Enter admin token...">
+            </div>
+
+            <div class="field">
+              <label for="manualTestSymbol">Manual Test Symbol</label>
+              <input id="manualTestSymbol" type="text" value="BTCUSDT" placeholder="Enter manual test symbol...">
+            </div>
+
+            <div class="field">
+              <label for="strategy">Strategy</label>
+              <select id="strategy">
+                <option>V3 router: all 5 strategies</option>
+                <option>Trend following EMA crossover</option>
+                <option>Support/resistance breakout</option>
+                <option>RSI divergence reversal</option>
+                <option>VWAP bounce</option>
+                <option>Opening range breakout</option>
+              </select>
+            </div>
+
+            <input id="symbol" type="hidden" value="BTCUSDT">
+            <div class="split">
+              <div class="field">
+                <label>Symbol source</label>
+                <div class="static-field">
+                  <strong id="symbolSourceText">Top gainers auto</strong>
+                  <span id="symbolUniverseText">Refreshes every 10 minutes</span>
+                </div>
+              </div>
+              <div class="field">
+                <label for="timeframe">Timeframe</label>
+                <select id="timeframe">
+                  <option>5m</option>
+                  <option>15m</option>
+                  <option>30m</option>
+                  <option>1h</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="allocation">Max allocation</label>
+                <input id="allocation" type="number" value="250" min="10" step="10">
+              </div>
+              <div class="field">
+                <label for="riskPerTrade">Risk / trade %</label>
+                <input id="riskPerTrade" type="number" value="0.25" min="0.05" max="5" step="0.05">
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="maxOpenPositions">Max open positions</label>
+                <input id="maxOpenPositions" type="number" value="1" min="1" max="5" step="1">
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="dailyLossCapInput">Daily loss cap</label>
+                <input id="dailyLossCapInput" type="number" value="25" min="0" max="500" step="1">
+              </div>
+              <div class="field">
+                <label for="maxTradesPerDay">Max trades/day</label>
+                <input id="maxTradesPerDay" type="number" value="6" min="1" max="50" step="1">
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="breakevenTrigger">Breakeven trigger %</label>
+              <input id="breakevenTrigger" type="number" value="0.6" min="0.1" max="5" step="0.1">
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="partialTpTrigger">Partial TP trigger %</label>
+              <input id="partialTpTrigger" type="number" value="1.4" min="0.1" max="10" step="0.1">
+              </div>
+              <div class="field">
+                <label for="partialTpClose">Partial close %</label>
+                <input id="partialTpClose" type="number" value="40" min="1" max="100" step="1">
+              </div>
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="trailingTrigger">Trailing trigger %</label>
+                <input id="trailingTrigger" type="number" value="1.8" min="0.1" max="10" step="0.1">
+              </div>
+              <div class="field">
+                <label for="trailingDistance">Trailing distance %</label>
+                <input id="trailingDistance" type="number" value="0.45" min="0.05" max="5" step="0.05">
+              </div>
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="stop">Stop loss %</label>
+                <input id="stop" type="number" value="0.8" min="0.1" max="10" step="0.1">
+              </div>
+              <div class="field">
+                <label for="take">Take profit %</label>
+                <input id="take" type="number" value="1.6" min="0.1" max="20" step="0.1">
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="routerMode">Router mode</label>
+              <select id="routerMode">
+                <option value="balanced">Balanced - 1 strong engine vote</option>
+                <option value="conservative" selected>Conservative - 2 matching votes</option>
+                <option value="aggressive">Aggressive demo - fastest signal</option>
+              </select>
+            </div>
+
+            <div class="auto-state" aria-live="polite">
+              <div>Auto trader: <strong id="autoStatus">Stopped</strong></div>
+              <div>Router signal: <strong id="autoSignal">WAIT</strong></div>
+              <div id="autoReason">No auto execution running.</div>
+              <div class="engine-grid" id="engineGrid">
+                <div class="engine-card">
+                  <span>Trend</span>
+                  <strong>WAIT</strong>
+                  <small>Waiting for data</small>
+                </div>
+                <div class="engine-card">
+                  <span>VWAP</span>
+                  <strong>WAIT</strong>
+                  <small>Waiting for data</small>
+                </div>
+                <div class="engine-card">
+                  <span>Breakout</span>
+                  <strong>WAIT</strong>
+                  <small>Waiting for data</small>
+                </div>
+              </div>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn primary" type="button" id="autoStartBtn">Start auto</button>
+              <button class="btn" type="button" id="autoStopBtn">Stop auto</button>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn" type="button" id="startBtn">Manual buy test</button>
+              <button class="btn" type="button" id="manageStopsBtn">Manage stops</button>
+            </div>
+
+            <!-- Sizing Preview Panel -->
+            <div id="sizingPreviewPanel" class="panel-body" style="border: 1px solid var(--line); border-radius: 8px; background: #0c1118; margin-top: 10px; padding: 12px;">
+              <h3 style="margin: 0 0 8px 0; font-size: 0.9rem; font-weight: 700; color: var(--yellow);">Sizing Preview</h3>
+              <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.8rem; color: var(--muted);">
+                <div>Mark Price: <strong id="previewMarkPrice" style="color: var(--text);">-</strong></div>
+                <div>Raw Qty: <strong id="previewRawQty" style="color: var(--text);">-</strong></div>
+                <div>Rounded Qty: <strong id="previewRoundedQty" style="color: var(--text);">-</strong></div>
+                <div>Min Qty: <strong id="previewMinQty" style="color: var(--text);">-</strong></div>
+                <div>Max Qty: <strong id="previewMaxQty" style="color: var(--text);">-</strong></div>
+                <div>Min Notional: <strong id="previewMinNotional" style="color: var(--text);">-</strong></div>
+                <div>Est. Notional: <strong id="previewEstimatedNotional" style="color: var(--text);">-</strong></div>
+              </div>
+              <div style="margin-top: 8px; font-size: 0.8rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 6px;">
+                Reason: <span id="previewReason" style="font-weight: bold; color: var(--text);">-</span>
+              </div>
+            </div>
+
+            <div class="btn-row">
+              <button class="btn danger" type="button" id="killBtn">Kill switch</button>
+            </div>
+
+            <div class="notice" id="controlNotice">Bybit demo execution needs the local backend running on http://127.0.0.1:8787.</div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Risk guard</h2>
+            <span class="tag" id="riskUsedTag">Live</span>
+          </div>
+          <div class="panel-body">
+            <div class="risk-meter">
+              <div class="label">Daily risk used</div>
+              <div class="meter-bar" aria-label="Daily risk used unavailable">
+                <div class="meter-fill"></div>
+              </div>
+            </div>
+            <div class="split">
+              <div>
+                <div class="label">Daily loss used</div>
+                <strong id="dailyLossCap">Loading</strong>
+              </div>
+              <div>
+                <div class="label">Trades today</div>
+                <strong id="maxOpenTrades">Loading</strong>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Bot Engine V2</h2>
+            <span class="tag" id="botEngineVersion">Loading</span>
+          </div>
+          <div class="exchange-grid">
+            <div class="exchange-item">
+              <span>Market data</span>
+              <strong id="engineMarketData">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Indicator</span>
+              <strong id="engineIndicator">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Strategy</span>
+              <strong id="engineStrategy">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Router</span>
+              <strong id="engineRouter">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Risk</span>
+              <strong id="engineRisk">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Trade management</span>
+              <strong id="engineTradeManagement">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Journal</span>
+              <strong id="engineJournal">Loading</strong>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="stack center-col">
+        <div class="metrics dashboard-only">
+          <article class="metric" data-icon="EQ">
+            <span>Equity</span>
+            <strong id="equityValue">Loading</strong>
+            <small id="equityMeta">Bybit wallet</small>
+          </article>
+          <article class="metric" data-icon="AV">
+            <span>Available balance</span>
+            <strong id="availableValue">Loading</strong>
+            <small id="availableMeta">UNIFIED account</small>
+          </article>
+          <article class="metric negative" data-icon="PNL">
+            <span>Floating PnL</span>
+            <strong id="floatingPnl">Loading</strong>
+            <small id="floatingMeta">Open positions</small>
+          </article>
+          <article class="metric" data-icon="OT">
+            <span>Open trades</span>
+            <strong id="openTradesValue">Loading</strong>
+            <small id="openTradesMeta">Positions</small>
+          </article>
+          <article class="metric" data-icon="MK">
+            <span>Selected mark</span>
+            <strong id="markPrice">Loading</strong>
+            <small id="markMeta">Ticker</small>
+          </article>
+        </div>
+
+        <section class="panel dashboard-only">
+          <div class="panel-head">
+            <h2 id="chartTitle">Intraday chart</h2>
+            <div class="chart-tools">
+              <span class="pill" id="chartSignal">Signal loading...</span>
+              <select class="form-select" id="chartType" aria-label="Chart type">
+                <option>Line</option>
+              </select>
+            </div>
+          </div>
+          <div class="chart-meta">
+            <span id="chartTimeframe">Timeframe: loading</span>
+            <span id="chartLastPrice">Last price: loading</span>
+            <span id="chartChange">24h change: loading</span>
+          </div>
+          <div class="chart-wrap">
+            <svg id="priceChart" viewBox="0 0 820 280" role="img" aria-label="Intraday price chart with EMA signal line">
+              <title>Intraday price and signal line</title>
+              <desc>Live Bybit candle close line for the selected symbol and timeframe.</desc>
+            </svg>
+          </div>
+          <div class="chart-footer">
+            <span id="chartHigh">High: loading</span>
+            <span id="chartLow">Low: loading</span>
+            <span id="chartOpen">Open: loading</span>
+            <span id="chartVolume">Volume: loading</span>
+          </div>
+        </section>
+
+        <section class="panel dashboard-only">
+          <div class="panel-head">
+            <h2>Open positions</h2>
+            <span class="tag buy" id="positionsCount">Loading</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pair</th>
+                  <th>Side</th>
+                  <th class="right">Entry</th>
+                  <th class="right">Mark</th>
+                  <th class="right">Size</th>
+                  <th class="right">PnL</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="positionsBody">
+                <tr><td colspan="7" class="muted">Loading live positions...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <aside class="right-col stack">
+        <section class="panel dashboard-only">
+          <div class="panel-head">
+            <h2>Exchange info</h2>
+            <span class="tag">Live</span>
+          </div>
+          <div class="exchange-grid">
+            <div class="exchange-item">
+              <span>Exchange</span>
+              <strong>Bybit Demo</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Account</span>
+              <strong>UNIFIED</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Base URL</span>
+              <strong id="exchangeBaseUrl">Checking</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Frontend API</span>
+              <strong id="frontendApiBase">Checking</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Selected pair</span>
+              <strong id="exchangeSymbol">Loading</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Backend</span>
+              <strong id="exchangeBackend">Checking</strong>
+            </div>
+            <div class="exchange-item">
+              <span>Data mode</span>
+              <strong>Live API</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel market-panel">
+          <div class="panel-head">
+            <h2>Market scanner</h2>
+            <span class="tag" id="scannerCountdown">Loading</span>
+          </div>
+          <div class="signal-list" id="scannerList">
+            <div class="signal">
+              <div>
+                <strong>Loading</strong>
+                <small>Waiting for live scanner data</small>
+              </div>
+              <span class="tag">WAIT</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel execution-panel">
+          <div class="panel-head">
+            <h2>Execution log</h2>
+            <span class="pill">Auto-refresh on</span>
+          </div>
+          <div class="panel-body">
+            <div class="timeline" id="log">
+              <div class="event">
+                <time>Live</time>
+                <p>No execution events in this browser session yet.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </section>
+
+    <section class="page-extra two-col-page" id="scannerSignalsPage" aria-label="Scanner and signals page">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Scanner & Signals</h2>
+          <span class="tag" id="scannerPageCountdown">Loading</span>
+        </div>
+        <div class="signal-list" id="scannerPageList">
+          <div class="signal">
+            <div>
+              <strong>Loading</strong>
+              <small>Waiting for live scanner data</small>
+            </div>
+            <span class="tag">WAIT</span>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Signal Engine Votes</h2>
+          <span class="tag" id="signalVoteTag">Live</span>
+        </div>
+        <div class="panel-body">
+          <div class="engine-grid" id="signalVoteGrid">
+            <div class="engine-card">
+              <span>Signal engines</span>
+              <strong>WAIT</strong>
+              <small>Waiting for router data</small>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="page-extra two-col-page" id="tradesJournalPage" aria-label="Active trades and trade journal page">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Active Trades</h2>
+            <span class="tag buy" id="positionsPageCount">Loading</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Pair</th>
+                  <th>Side</th>
+                  <th class="right">Entry</th>
+                  <th class="right">Mark</th>
+                  <th class="right">Size</th>
+                  <th class="right">PnL</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="positionsPageBody">
+                <tr><td colspan="7" class="muted">Loading live positions...</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Trade Management</h2>
+            <button class="btn" type="button" id="manageStopsBtnPage">Manage stops</button>
+          </div>
+          <div class="exchange-grid">
+            <div class="exchange-item"><span>Breakeven trigger</span><strong id="tmBreakeven">Loading</strong></div>
+            <div class="exchange-item"><span>Partial TP</span><strong id="tmPartial">Loading</strong></div>
+            <div class="exchange-item"><span>Trailing stop</span><strong id="tmTrailing">Loading</strong></div>
+            <div class="exchange-item"><span>Last manager result</span><strong id="tmLastResult">Loading</strong></div>
+          </div>
+        </section>
+      </div>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Trade Journal</h2>
+          <button class="btn" type="button" id="exportJournalBtn">Export CSV</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Event</th>
+                <th>Symbol</th>
+                <th>Side</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="journalTableBody">
+              <tr><td colspan="5" class="muted">Loading journal...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-body">
+          <div class="timeline" id="journalPageLog">
+            <div class="event">
+              <time>Live</time>
+              <p>No persistent trade journal events yet.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="page-extra three-col-page" id="analyticsPage" aria-label="Strategy and performance analytics page">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Performance Analytics</h2>
+          <span class="tag">Live</span>
+        </div>
+        <div class="exchange-grid">
+          <div class="exchange-item">
+            <span>Trades today</span>
+            <strong id="analyticsTradesToday">Loading</strong>
+          </div>
+          <div class="exchange-item">
+            <span>Daily loss used</span>
+            <strong id="analyticsLossUsed">Loading</strong>
+          </div>
+          <div class="exchange-item">
+            <span>Router mode</span>
+            <strong id="analyticsRouterMode">Loading</strong>
+          </div>
+          <div class="exchange-item">
+            <span>Last signal</span>
+            <strong id="analyticsLastSignal">Loading</strong>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Strategy Votes</h2>
+          <span class="tag" id="analyticsVoteCount">Loading</span>
+        </div>
+        <div class="panel-body">
+          <div class="engine-grid" id="analyticsStrategyGrid">
+            <div class="engine-card">
+              <span>Strategies</span>
+              <strong>WAIT</strong>
+              <small>Waiting for live engine votes</small>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Engine Health</h2>
+          <span class="tag">V2</span>
+        </div>
+        <div class="exchange-grid" id="analyticsHealthGrid">
+          <div class="exchange-item">
+            <span>Engine status</span>
+            <strong>Loading</strong>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <section class="page-extra two-col-page" id="backtestPage" aria-label="Backtest and paper replay page">
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Backtest / Paper Replay</h2>
+          <span class="tag">Live candles</span>
+        </div>
+        <div class="panel-body">
+          <div class="split">
+            <div class="field">
+              <label for="replaySymbol">Replay symbol</label>
+              <input id="replaySymbol" type="text" value="BTCUSDT">
+            </div>
+            <div class="field">
+              <label for="replayHorizon">Replay range</label>
+              <select id="replayHorizon">
+                <option value="24h">Last 24h</option>
+                <option value="7d">Last 7d</option>
+              </select>
+            </div>
+          </div>
+          <button class="btn primary" type="button" id="runReplayBtn">Run candle replay</button>
+          <p class="page-note">Replay uses live Bybit candle data from the backend and summarizes the selected symbol only.</p>
+        </div>
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Replay Result</h2>
+          <span class="pill" id="replayResultTag">Idle</span>
+        </div>
+        <div class="panel-body" id="replayResult">
+          <p class="page-note">No replay run yet.</p>
+        </div>
+      </section>
+    </section>
+
+    <footer class="footerbar">
+      <span><span class="dot"></span> Data source: Bybit Demo</span>
+      <span>Uptime <strong id="uptimeValue">00:00:00</strong></span>
+      <span>API latency <strong id="apiLatency">Checking</strong></span>
+      <span>Router status <strong id="routerStatus">Waiting</strong></span>
+      <span>Engine status <strong id="engineStatusFooter">Waiting</strong></span>
+    </footer>
+  </main>
+
+  <script>
+    const chart = document.getElementById("priceChart");
+    const notice = document.getElementById("controlNotice");
+    const backendStatus = document.getElementById("backendStatus");
+    const autoStatus = document.getElementById("autoStatus");
+    const autoSignal = document.getElementById("autoSignal");
+    const autoReason = document.getElementById("autoReason");
+    const engineGrid = document.getElementById("engineGrid");
+    const equityValue = document.getElementById("equityValue");
+    const equityMeta = document.getElementById("equityMeta");
+    const availableValue = document.getElementById("availableValue");
+    const floatingPnl = document.getElementById("floatingPnl");
+    const floatingMeta = document.getElementById("floatingMeta");
+    const openTradesValue = document.getElementById("openTradesValue");
+    const openTradesMeta = document.getElementById("openTradesMeta");
+    const markPrice = document.getElementById("markPrice");
+    const markMeta = document.getElementById("markMeta");
+    const chartTitle = document.getElementById("chartTitle");
+    const chartSignal = document.getElementById("chartSignal");
+    const chartTimeframe = document.getElementById("chartTimeframe");
+    const chartLastPrice = document.getElementById("chartLastPrice");
+    const chartChange = document.getElementById("chartChange");
+    const chartHigh = document.getElementById("chartHigh");
+    const chartLow = document.getElementById("chartLow");
+    const chartOpen = document.getElementById("chartOpen");
+    const chartVolume = document.getElementById("chartVolume");
+    const positionsBody = document.getElementById("positionsBody");
+    const positionsCount = document.getElementById("positionsCount");
+    const scannerList = document.getElementById("scannerList");
+    const scannerPageList = document.getElementById("scannerPageList");
+    const scannerCountdown = document.getElementById("scannerCountdown");
+    const scannerPageCountdown = document.getElementById("scannerPageCountdown");
+    const symbolSourceText = document.getElementById("symbolSourceText");
+    const symbolUniverseText = document.getElementById("symbolUniverseText");
+    const clockPill = document.getElementById("clockPill");
+    const dailyLossCap = document.getElementById("dailyLossCap");
+    const maxOpenTrades = document.getElementById("maxOpenTrades");
+    const engineAlive = document.getElementById("engineAlive");
+    const lastCycle = document.getElementById("lastCycle");
+    const nextScan = document.getElementById("nextScan");
+    const marketUpdated = document.getElementById("marketUpdated");
+    const uptimeValue = document.getElementById("uptimeValue");
+    const apiLatency = document.getElementById("apiLatency");
+    const routerStatus = document.getElementById("routerStatus");
+    const engineStatusFooter = document.getElementById("engineStatusFooter");
+    const pageTabs = Array.from(document.querySelectorAll(".page-tab"));
+    const lifeSignal = document.getElementById("lifeSignal");
+    const lifeGuard = document.getElementById("lifeGuard");
+    const lifeOrder = document.getElementById("lifeOrder");
+    const lifeStatus = document.getElementById("lifeStatus");
+    const dashboardTab = document.getElementById("dashboardTab");
+    const controlTab = document.getElementById("controlTab");
+    const exchangeBaseUrl = document.getElementById("exchangeBaseUrl");
+    const frontendApiBase = document.getElementById("frontendApiBase");
+    const exchangeSymbol = document.getElementById("exchangeSymbol");
+    const exchangeBackend = document.getElementById("exchangeBackend");
+    const botEngineVersion = document.getElementById("botEngineVersion");
+    const engineMarketData = document.getElementById("engineMarketData");
+    const engineIndicator = document.getElementById("engineIndicator");
+    const engineStrategy = document.getElementById("engineStrategy");
+    const engineRouter = document.getElementById("engineRouter");
+    const engineRisk = document.getElementById("engineRisk");
+    const engineTradeManagement = document.getElementById("engineTradeManagement");
+    const engineJournal = document.getElementById("engineJournal");
+    const signalVoteGrid = document.getElementById("signalVoteGrid");
+    const signalVoteTag = document.getElementById("signalVoteTag");
+    const positionsPageBody = document.getElementById("positionsPageBody");
+    const positionsPageCount = document.getElementById("positionsPageCount");
+    const journalPageLog = document.getElementById("journalPageLog");
+    const journalTableBody = document.getElementById("journalTableBody");
+    const exportJournalBtn = document.getElementById("exportJournalBtn");
+    const manageStopsBtnPage = document.getElementById("manageStopsBtnPage");
+    const tmBreakeven = document.getElementById("tmBreakeven");
+    const tmPartial = document.getElementById("tmPartial");
+    const tmTrailing = document.getElementById("tmTrailing");
+    const tmLastResult = document.getElementById("tmLastResult");
+    const analyticsTradesToday = document.getElementById("analyticsTradesToday");
+    const analyticsLossUsed = document.getElementById("analyticsLossUsed");
+    const analyticsRouterMode = document.getElementById("analyticsRouterMode");
+    const analyticsLastSignal = document.getElementById("analyticsLastSignal");
+    const analyticsVoteCount = document.getElementById("analyticsVoteCount");
+    const analyticsStrategyGrid = document.getElementById("analyticsStrategyGrid");
+    const analyticsHealthGrid = document.getElementById("analyticsHealthGrid");
+    const replaySymbol = document.getElementById("replaySymbol");
+    const replayHorizon = document.getElementById("replayHorizon");
+    const replayResult = document.getElementById("replayResult");
+    const replayResultTag = document.getElementById("replayResultTag");
+    const apiParam = new URLSearchParams(window.location.search).get("api");
+    const storedApiBase = localStorage.getItem("bybitBotApiBase");
+    const isLocalHost = ["127.0.0.1", "localhost"].includes(window.location.hostname);
+    const defaultApiBase = window.location.protocol === "file:"
+      ? "http://127.0.0.1:8787"
+      : isLocalHost
+        ? `${window.location.protocol}//${window.location.hostname}:8787`
+        : window.location.origin;
+    const apiBase = (apiParam || storedApiBase || defaultApiBase).replace(/\/+$/, "");
+    if (apiParam) localStorage.setItem("bybitBotApiBase", apiBase);
+
+    // Load and listen for Admin Token
+    const adminTokenInput = document.getElementById("adminToken");
+    if (adminTokenInput) {
+      adminTokenInput.value = localStorage.getItem("bybitAdminToken") || "";
+      adminTokenInput.addEventListener("input", (e) => {
+        localStorage.setItem("bybitAdminToken", e.target.value.trim());
+      });
+    }
+
+    // Load and listen for Manual Test Symbol
+    const manualTestSymbolInput = document.getElementById("manualTestSymbol");
+    if (manualTestSymbolInput) {
+      manualTestSymbolInput.value = localStorage.getItem("bybitManualTestSymbol") || "BTCUSDT";
+      manualTestSymbolInput.addEventListener("input", (e) => {
+        localStorage.setItem("bybitManualTestSymbol", e.target.value.trim().toUpperCase());
+        if (typeof refreshSizingPreview === "function") {
+          refreshSizingPreview();
+        }
+      });
+    }
+
+    const appStartedAt = Date.now();
+    const scannerRefreshMs = 30000;
+    let lastMarketRefreshAt = null;
+    let lastApiLatency = null;
+    let scannerUniverse = null;
+    let latestJournalEntries = [];
+    let nextScannerRefreshAt = Date.now() + scannerRefreshMs;
+
+    function money(value, digits = 2) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return "Unavailable";
+      return `$${num.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
+    }
+
+    function numberText(value, digits = 4) {
+      const num = Number(value);
+      if (!Number.isFinite(num)) return "-";
+      return num.toLocaleString(undefined, { maximumFractionDigits: digits });
+    }
+
+    function secondsAgo(timestampMs) {
+      if (!timestampMs) return "Waiting";
+      const seconds = Math.max(0, Math.floor((Date.now() - timestampMs) / 1000));
+      return `${seconds}s ago`;
+    }
+
+    function duration(ms) {
+      const total = Math.max(0, Math.floor(ms / 1000));
+      const h = String(Math.floor(total / 3600)).padStart(2, "0");
+      const m = String(Math.floor((total % 3600) / 60)).padStart(2, "0");
+      const s = String(total % 60).padStart(2, "0");
+      return `${h}:${m}:${s}`;
+    }
+
+    function shortDuration(ms) {
+      return duration(ms).replace(/^00:/, "");
+    }
+
+    async function refreshSizingPreview() {
+      const symbolInput = document.getElementById("manualTestSymbol");
+      if (!symbolInput) return;
+      const symbol = symbolInput.value.trim().toUpperCase();
+      if (!symbol) return;
+      try {
+        const data = await api(`/api/bot/sizing?symbol=${encodeURIComponent(symbol)}`);
+        const sizing = data.sizing || {};
+        const markPriceEl = document.getElementById("previewMarkPrice");
+        const rawQtyEl = document.getElementById("previewRawQty");
+        const roundedQtyEl = document.getElementById("previewRoundedQty");
+        const minQtyEl = document.getElementById("previewMinQty");
+        const maxQtyEl = document.getElementById("previewMaxQty");
+        const minNotionalEl = document.getElementById("previewMinNotional");
+        const estNotionalEl = document.getElementById("previewEstimatedNotional");
+        const reasonEl = document.getElementById("previewReason");
+
+        if (markPriceEl) markPriceEl.textContent = sizing.markPrice !== undefined ? numberText(sizing.markPrice, 4) : "-";
+        if (rawQtyEl) rawQtyEl.textContent = sizing.rawQty || "-";
+        if (roundedQtyEl) roundedQtyEl.textContent = sizing.roundedQty || "-";
+        if (minQtyEl) minQtyEl.textContent = sizing.minQty || "-";
+        if (maxQtyEl) maxQtyEl.textContent = sizing.maxQty || "-";
+        if (minNotionalEl) minNotionalEl.textContent = sizing.minNotionalValue || "-";
+        if (estNotionalEl) estNotionalEl.textContent = sizing.estimatedNotional !== undefined ? money(sizing.estimatedNotional, 2) : "-";
+        if (reasonEl) {
+          reasonEl.textContent = sizing.reason || "-";
+          if (sizing.ok) {
+            reasonEl.style.color = "var(--green)";
+          } else {
+            reasonEl.style.color = "var(--red)";
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch sizing preview", err);
+      }
+    }
+
+    function activeSymbol() {
+      return document.getElementById("symbol").value || "BTCUSDT";
+    }
+
+    function setActiveSymbol(symbol) {
+      if (!symbol) return;
+      document.getElementById("symbol").value = symbol;
+      exchangeSymbol.textContent = symbol;
+    }
+
+    function updateUniverseText(universe) {
+      if (!universe) return;
+      const symbols = Array.isArray(universe.symbols) ? universe.symbols : [];
+      symbolSourceText.textContent = universe.source === "top_gainers" ? "Top gainers auto" : "Fallback universe";
+      symbolUniverseText.textContent = symbols.length ? symbols.join(", ") : "Waiting for universe";
+    }
+
+    function updateCountdowns() {
+      let label = "";
+      if (scannerUniverse && scannerUniverse.nextRefreshAt) {
+        const nextUniverseMs = Math.max(0, (Number(scannerUniverse.nextRefreshAt) * 1000) - Date.now());
+        const nextScanMs = Math.max(0, nextScannerRefreshAt - Date.now());
+        label = `Scan ${shortDuration(nextScanMs)} | Top ${shortDuration(nextUniverseMs)}`;
+      } else {
+        label = `Scan ${shortDuration(nextScannerRefreshAt - Date.now())}`;
+      }
+      scannerCountdown.textContent = label;
+      scannerPageCountdown.textContent = label;
+    }
+
+    function clearChart(message) {
+      chart.innerHTML = "";
+      const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      text.setAttribute("x", "410");
+      text.setAttribute("y", "140");
+      text.setAttribute("class", "chart-label");
+      text.setAttribute("text-anchor", "middle");
+      text.textContent = message;
+      chart.appendChild(text);
+    }
+
+    function renderChart(candles) {
+      if (!Array.isArray(candles) || candles.length < 2) {
+        clearChart("No live candle data");
+        return;
+      }
+      chart.innerHTML = "";
+      const prices = candles.map((item) => Number(item.close)).filter(Number.isFinite);
+      const w = 820;
+      const h = 280;
+      const pad = { top: 18, right: 48, bottom: 34, left: 54 };
+      const min = Math.min(...prices);
+      const max = Math.max(...prices);
+      const range = Math.max(max - min, 1);
+      const x = (i) => pad.left + (i * (w - pad.left - pad.right) / (prices.length - 1));
+      const y = (v) => pad.top + ((max - v) * (h - pad.top - pad.bottom) / range);
+      const pathFor = (data) => data.map((value, index) => `${index === 0 ? "M" : "L"} ${x(index).toFixed(1)} ${y(value).toFixed(1)}`).join(" ");
+
+      function line(x1, y1, x2, y2, cls) {
+        const node = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        node.setAttribute("x1", x1);
+        node.setAttribute("y1", y1);
+        node.setAttribute("x2", x2);
+        node.setAttribute("y2", y2);
+        node.setAttribute("class", cls);
+        chart.appendChild(node);
+      }
+
+      for (let i = 0; i < 5; i++) {
+        const gy = pad.top + i * ((h - pad.top - pad.bottom) / 4);
+        line(pad.left, gy, w - pad.right, gy, "grid-line");
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        const value = max - i * (range / 4);
+        label.setAttribute("x", 8);
+        label.setAttribute("y", gy + 4);
+        label.setAttribute("class", "chart-label");
+        label.textContent = numberText(value, 2);
+        chart.appendChild(label);
+      }
+
+      line(pad.left, pad.top, pad.left, h - pad.bottom, "axis");
+      line(pad.left, h - pad.bottom, w - pad.right, h - pad.bottom, "axis");
+
+      const pricePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      pricePath.setAttribute("d", pathFor(prices));
+      pricePath.setAttribute("class", "price-line");
+      chart.appendChild(pricePath);
+
+      const last = prices[prices.length - 1];
+      const point = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      point.setAttribute("cx", x(prices.length - 1));
+      point.setAttribute("cy", y(last));
+      point.setAttribute("r", 5);
+      point.setAttribute("fill", "var(--yellow)");
+      chart.appendChild(point);
+
+      const lastLabel = document.createElementNS("http://www.w3.org/2000/svg", "text");
+      lastLabel.setAttribute("x", Math.max(120, x(prices.length - 1) - 90));
+      lastLabel.setAttribute("y", y(last) - 13);
+      lastLabel.setAttribute("class", "chart-label");
+      lastLabel.textContent = `Last ${numberText(last, 2)}`;
+      chart.appendChild(lastLabel);
+
+      const high = Math.max(...candles.map((item) => Number(item.high)).filter(Number.isFinite));
+      const low = Math.min(...candles.map((item) => Number(item.low)).filter(Number.isFinite));
+      const open = Number(candles[0].open);
+      const volume = candles.reduce((sum, item) => sum + (Number(item.volume) || 0), 0);
+      chartHigh.textContent = `High ${numberText(high, 2)}`;
+      chartLow.textContent = `Low ${numberText(low, 2)}`;
+      chartOpen.textContent = `Open ${numberText(open, 2)}`;
+      chartVolume.textContent = `Volume ${numberText(volume, 2)}`;
+    }
+
+    function appendLog(message) {
+      const log = document.getElementById("log");
+      const item = document.createElement("div");
+      item.className = "event";
+      const now = new Date();
+      const time = document.createElement("time");
+      time.textContent = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const body = document.createElement("p");
+      body.textContent = message;
+      item.append(time, body);
+      log.prepend(item);
+    }
+
+    function renderJournalInto(target, entries) {
+      if (!Array.isArray(entries) || !entries.length) {
+        target.innerHTML = `
+          <div class="event">
+            <time>Live</time>
+            <p>No persistent trade journal events yet.</p>
+          </div>
+        `;
+        return;
+      }
+      target.innerHTML = "";
+      entries.slice().reverse().forEach((entry) => {
+        const item = document.createElement("div");
+        item.className = "event";
+        const time = document.createElement("time");
+        time.textContent = new Date(Number(entry.time || 0) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const body = document.createElement("p");
+        const payload = entry.payload || {};
+        const symbol = payload.symbol ? ` ${payload.symbol}` : "";
+        const signal = payload.signal || payload.side || "";
+        const result = payload.result || {};
+        const retMsg = result.retMsg ? `: ${result.retMsg}` : "";
+        body.textContent = `${entry.event || "event"}${symbol}${signal ? ` ${signal}` : ""}${retMsg}`;
+        item.append(time, body);
+        target.appendChild(item);
+      });
+    }
+
+    function renderJournal(entries) {
+      latestJournalEntries = Array.isArray(entries) ? entries : [];
+      const log = document.getElementById("log");
+      renderJournalInto(log, entries);
+      renderJournalInto(journalPageLog, entries);
+      if (!latestJournalEntries.length) {
+        journalTableBody.innerHTML = `<tr><td colspan="5" class="muted">No persistent trade journal events yet.</td></tr>`;
+        return;
+      }
+      journalTableBody.innerHTML = "";
+      latestJournalEntries.slice().reverse().forEach((entry) => {
+        const payload = entry.payload || {};
+        const result = payload.result || {};
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td>${new Date(Number(entry.time || 0) * 1000).toLocaleString()}</td>
+          <td>${entry.event || "event"}</td>
+          <td>${payload.symbol || "-"}</td>
+          <td>${payload.signal || payload.side || "-"}</td>
+          <td>${result.retMsg || result.reason || (result.retCode === 0 ? "OK" : "-")}</td>
+        `;
+        journalTableBody.appendChild(tr);
+      });
+    }
+
+    function exportJournalCsv() {
+      const rows = [["time", "event", "symbol", "side", "status"]];
+      latestJournalEntries.forEach((entry) => {
+        const payload = entry.payload || {};
+        const result = payload.result || {};
+        rows.push([
+          new Date(Number(entry.time || 0) * 1000).toISOString(),
+          entry.event || "",
+          payload.symbol || "",
+          payload.signal || payload.side || "",
+          result.retMsg || result.reason || (result.retCode === 0 ? "OK" : "")
+        ]);
+      });
+      const csv = rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `bybit-trade-journal-${Date.now()}.csv`;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function api(path, options = {}) {
+      const started = performance.now();
+      const headers = { "Content-Type": "application/json" };
+      const token = localStorage.getItem("bybitAdminToken");
+      if (token && token.trim()) {
+        headers["Authorization"] = `Bearer ${token.trim()}`;
+      }
+      if (options.headers) {
+        Object.assign(headers, options.headers);
+      }
+      const response = await fetch(`${apiBase}${path}`, {
+        ...options,
+        headers
+      });
+      if (response.status === 401) {
+        const isPost = options.method && options.method.toUpperCase() === "POST";
+        if (isPost) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+          throw new Error("Unauthorized: admin token missing or invalid.");
+        }
+      }
+      lastApiLatency = Math.round(performance.now() - started);
+      apiLatency.textContent = `${lastApiLatency}ms`;
+      return response.json();
+    }
+
+    async function checkBackend() {
+      frontendApiBase.textContent = apiBase;
+      try {
+        const result = await api("/api/health");
+        backendStatus.textContent = result.hasApiKey && result.hasApiSecret ? "Backend connected" : "Backend missing keys";
+        engineAlive.textContent = result.hasApiKey && result.hasApiSecret ? "Bot heartbeat" : "Missing keys";
+        exchangeBaseUrl.textContent = result.baseUrl || "Unavailable";
+        exchangeBackend.textContent = result.hasApiKey && result.hasApiSecret ? "Connected" : "Missing keys";
+        notice.textContent = result.hasApiKey && result.hasApiSecret
+          ? "Bybit demo backend connected. Display data is live from backend/Bybit."
+          : "Backend is running, but .env is missing BYBIT_API_KEY or BYBIT_API_SECRET.";
+      } catch (error) {
+        backendStatus.textContent = "Backend offline";
+        engineAlive.textContent = "Offline";
+        exchangeBaseUrl.textContent = "Unavailable";
+        exchangeBackend.textContent = "Offline";
+        notice.textContent = `Start the Bybit backend first, then refresh. Current API base: ${apiBase}`;
+      }
+    }
+
+    async function refreshClock() {
+      clockPill.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      uptimeValue.textContent = duration(Date.now() - appStartedAt);
+      marketUpdated.textContent = secondsAgo(lastMarketRefreshAt);
+      updateCountdowns();
+    }
+
+    async function refreshWallet() {
+      try {
+        const result = await api("/api/bybit/wallet");
+        if (result.retCode !== 0) {
+          equityValue.textContent = "Unavailable";
+          availableValue.textContent = "Unavailable";
+          equityMeta.textContent = result.retMsg || "Wallet error";
+          return;
+        }
+        const account = ((result.result || {}).list || [])[0] || {};
+        equityValue.textContent = money(account.totalEquity);
+        availableValue.textContent = money(account.totalAvailableBalance);
+        equityMeta.textContent = "Live Bybit demo wallet";
+      } catch (error) {
+        equityValue.textContent = "Unavailable";
+        availableValue.textContent = "Unavailable";
+        equityMeta.textContent = "Backend wallet request failed";
+      }
+    }
+
+    async function refreshTickerAndChart() {
+      const symbol = activeSymbol();
+      const interval = intervalForUi(document.getElementById("timeframe").value);
+      chartTitle.textContent = `${symbol} intraday chart`;
+      exchangeSymbol.textContent = symbol;
+      chartTimeframe.textContent = `Timeframe: ${document.getElementById("timeframe").value}`;
+      try {
+        const ticker = await api(`/api/bybit/ticker?symbol=${encodeURIComponent(symbol)}`);
+        if (ticker.retCode === 0) {
+          const row = (((ticker.result || {}).list) || [])[0] || {};
+          const liveMark = row.markPrice || row.lastPrice;
+          const change = row.price24hPcnt ? Number(row.price24hPcnt) * 100 : null;
+          markPrice.textContent = money(liveMark, 2);
+          markMeta.textContent = `24h ${numberText(change, 2)}%`;
+          chartLastPrice.textContent = `Last price: ${numberText(liveMark, 2)}`;
+          chartChange.textContent = `24h change: ${numberText(change, 2)}%`;
+        } else {
+          markPrice.textContent = "Unavailable";
+          markMeta.textContent = ticker.retMsg || "Ticker error";
+        }
+
+        const candles = await api(`/api/bybit/kline?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`);
+        if (candles.ok) {
+          renderChart(candles.candles);
+          lastMarketRefreshAt = Date.now();
+        } else {
+          clearChart(candles.message || "No live candle data");
+        }
+      } catch (error) {
+        markPrice.textContent = "Unavailable";
+        markMeta.textContent = "Ticker request failed";
+        clearChart("Backend chart request failed");
+      }
+    }
+
+    async function refreshPositions() {
+      const symbol = activeSymbol();
+      try {
+        const result = await api(`/api/bybit/positions`);
+        if (result.retCode !== 0) {
+          positionsBody.innerHTML = `<tr><td colspan="7" class="muted">${result.retMsg || "Position request failed"}</td></tr>`;
+          positionsPageBody.innerHTML = `<tr><td colspan="7" class="muted">${result.retMsg || "Position request failed"}</td></tr>`;
+          positionsCount.textContent = "Error";
+          positionsPageCount.textContent = "Error";
+          floatingPnl.textContent = "Unavailable";
+          return;
+        }
+        const rows = ((result.result || {}).list || []).filter((item) => Number(item.size || 0) !== 0);
+        positionsCount.textContent = `${rows.length} active`;
+        positionsPageCount.textContent = `${rows.length} active`;
+        openTradesValue.textContent = String(rows.length);
+        openTradesMeta.textContent = rows.length ? "Live positions" : "No open position";
+        if (!rows.length) {
+          const empty = `<tr><td colspan="7"><div class="empty-state"><strong>No open positions</strong><span>The bot will open positions automatically when signals are confirmed.</span></div></td></tr>`;
+          positionsBody.innerHTML = empty;
+          positionsPageBody.innerHTML = empty;
+          floatingPnl.textContent = "$0.00";
+          floatingMeta.textContent = "No open position";
+          return;
+        }
+        let totalPnl = 0;
+        positionsBody.innerHTML = "";
+        positionsPageBody.innerHTML = "";
+        rows.forEach((position) => {
+          const pnl = Number(position.unrealisedPnl || 0);
+          totalPnl += pnl;
+          const tr = document.createElement("tr");
+          tr.innerHTML = `
+            <td>${position.symbol || symbol}</td>
+            <td class="${position.side === "Buy" ? "green" : "red"}">${position.side || "-"}</td>
+            <td class="right">${numberText(position.avgPrice, 4)}</td>
+            <td class="right">${numberText(position.markPrice, 4)}</td>
+            <td class="right">${numberText(position.size, 6)}</td>
+            <td class="right ${pnl >= 0 ? "green" : "red"}">${money(pnl, 4)}</td>
+            <td><span class="tag">${position.positionStatus || "Open"}</span></td>
+          `;
+          positionsBody.appendChild(tr);
+          positionsPageBody.appendChild(tr.cloneNode(true));
+        });
+        floatingPnl.textContent = money(totalPnl, 4);
+        floatingPnl.className = totalPnl >= 0 ? "green" : "red";
+        floatingMeta.textContent = `${rows.length} open position`;
+      } catch (error) {
+        positionsBody.innerHTML = `<tr><td colspan="7" class="muted">Backend position request failed</td></tr>`;
+        positionsPageBody.innerHTML = `<tr><td colspan="7" class="muted">Backend position request failed</td></tr>`;
+        positionsCount.textContent = "Error";
+        positionsPageCount.textContent = "Error";
+      }
+    }
+
+    async function refreshScanner() {
+      const interval = intervalForUi(document.getElementById("timeframe").value);
+      const mode = document.getElementById("routerMode").value;
+      try {
+        const result = await api(`/api/bot/scanner?interval=${encodeURIComponent(interval)}&mode=${encodeURIComponent(mode)}`);
+        nextScannerRefreshAt = Date.now() + (Number(result.scanSeconds || 30) * 1000);
+        scannerUniverse = result.universe || scannerUniverse;
+        updateUniverseText(scannerUniverse);
+        updateCountdowns();
+        if (!result.ok) {
+          const unavailable = `<div class="signal"><div><strong>Scanner unavailable</strong><small>Backend scanner request failed</small></div><span class="tag">WAIT</span></div>`;
+          scannerList.innerHTML = unavailable;
+          scannerPageList.innerHTML = unavailable;
+          return;
+        }
+        scannerList.innerHTML = "";
+        scannerPageList.innerHTML = "";
+        if (result.rows && result.rows[0]) setActiveSymbol(result.rows[0].symbol);
+        result.rows.forEach((row) => {
+          const item = document.createElement("div");
+          item.className = "signal";
+          const tagClass = row.signal === "Buy" ? "buy" : row.signal === "Sell" ? "sell" : "";
+          const coin = row.symbol.slice(0, 3);
+          const marketInfo = row.changePct !== undefined
+            ? ` | 24h ${numberText(row.changePct, 2)}%, spread ${numberText(row.spreadPct || 0, 3)}%`
+            : "";
+          item.innerHTML = `
+            <div class="coin">${coin}</div>
+            <div>
+              <strong>${row.symbol}</strong>
+              <small>${row.reason}${marketInfo}</small>
+            </div>
+            <span class="tag ${tagClass}">${row.signal}</span>
+          `;
+          scannerList.appendChild(item);
+          scannerPageList.appendChild(item.cloneNode(true));
+        });
+      } catch (error) {
+        const unavailable = `<div class="signal"><div><strong>Scanner unavailable</strong><small>Backend scanner request failed</small></div><span class="tag">WAIT</span></div>`;
+        scannerList.innerHTML = unavailable;
+        scannerPageList.innerHTML = unavailable;
+      }
+    }
+
+    async function refreshLiveData() {
+      refreshClock();
+      await Promise.all([refreshWallet(), refreshScanner()]);
+      await Promise.all([refreshTickerAndChart(), refreshPositions(), refreshSizingPreview()]);
+    }
+
+    function intervalForUi(value) {
+      return value.replace("m", "").replace("h", "60");
+    }
+
+    function setLifecycleStep(el, label, state) {
+      const cleanState = String(state || "idle").toLowerCase();
+      el.dataset.state = cleanState;
+      const dot = el.querySelector(".life-dot");
+      const dotText = dot ? dot.outerHTML : "";
+      el.innerHTML = `${dotText}${label}: ${state || "idle"}`;
+    }
+
+    function renderLifecycle(lifecycle = {}) {
+      setLifecycleStep(lifeSignal, "Signal", lifecycle.signal || "WAIT");
+      setLifecycleStep(lifeGuard, "Guard", lifecycle.guard || "idle");
+      setLifecycleStep(lifeOrder, "Order", lifecycle.order || "idle");
+      setLifecycleStep(lifeStatus, "Status", lifecycle.status || "idle");
+
+      const reasonEl = document.getElementById("lifecycleReason");
+      const reasonTextEl = document.getElementById("lifecycleReasonText");
+      if (reasonEl && reasonTextEl) {
+        if ((lifecycle.guard === "blocked" || lifecycle.status === "blocked") && lifecycle.reason) {
+          reasonTextEl.textContent = lifecycle.reason;
+          reasonEl.style.display = "block";
+        } else {
+          reasonEl.style.display = "none";
+        }
+      }
+    }
+
+    function renderVoteGrid(target, votes) {
+      target.innerHTML = "";
+      if (!Array.isArray(votes) || !votes.length) {
+        target.innerHTML = `<div class="engine-card"><span>Signal engines</span><strong>WAIT</strong><small>Waiting for live engine votes</small></div>`;
+        return;
+      }
+      votes.forEach((vote) => {
+        const card = document.createElement("div");
+        card.className = "engine-card";
+        const name = document.createElement("span");
+        name.textContent = vote.engine;
+        const signal = document.createElement("strong");
+        signal.textContent = vote.signal;
+        if (vote.signal === "Buy") signal.className = "green";
+        if (vote.signal === "Sell") signal.className = "red";
+        const reason = document.createElement("small");
+        reason.textContent = vote.reason;
+        card.append(name, signal, reason);
+        target.append(card);
+      });
+    }
+
+    function renderAnalytics(bot) {
+      const dailyRisk = bot.dailyRisk || {};
+      const votes = bot.engineVotes || [];
+      const overview = bot.engineOverview || {};
+      const status = overview.status || bot.engineStatus || {};
+      analyticsTradesToday.textContent = `${dailyRisk.tradesToday || 0} / ${dailyRisk.maxTradesPerDay || bot.maxTradesPerDay || 0}`;
+      analyticsLossUsed.textContent = `$${numberText(dailyRisk.lossUsed || 0, 2)} / $${numberText(dailyRisk.dailyLossCapUsdt || bot.dailyLossCapUsdt || 0, 2)}`;
+      analyticsRouterMode.textContent = bot.mode || "balanced";
+      analyticsLastSignal.textContent = bot.lastSignal || "WAIT";
+      analyticsVoteCount.textContent = `${votes.length} engines`;
+      renderVoteGrid(analyticsStrategyGrid, votes);
+      analyticsHealthGrid.innerHTML = "";
+      Object.entries(status).forEach(([name, value]) => {
+        const item = document.createElement("div");
+        item.className = "exchange-item";
+        item.innerHTML = `<span>${name}</span><strong>${value || "idle"}</strong>`;
+        analyticsHealthGrid.appendChild(item);
+      });
+      if (!analyticsHealthGrid.children.length) {
+        analyticsHealthGrid.innerHTML = `<div class="exchange-item"><span>Engine status</span><strong>Waiting</strong></div>`;
+      }
+    }
+
+    function renderBotStatus(bot) {
+      autoStatus.textContent = bot.enabled ? "Running" : "Stopped";
+      autoSignal.textContent = bot.lastSignal || "WAIT";
+      const router = bot.router || {};
+      const mode = router.mode || bot.mode || "balanced";
+      const picked = bot.selectedSignalSymbol || bot.symbol || "BTCUSDT";
+      const sizing = bot.positionSizing || {};
+      const notionalText = sizing.notional ? ` / ${money(sizing.notional, 2)}` : "";
+      const sizeText = sizing.qty ? ` | qty ${sizing.qty}${notionalText}` : "";
+      if (bot.enabled) setActiveSymbol(picked);
+      const displaySymbol = bot.enabled ? picked : activeSymbol();
+      scannerUniverse = bot.universe || scannerUniverse;
+      updateUniverseText(scannerUniverse);
+      updateCountdowns();
+      const guard = bot.executionGuard || {};
+      const guardText = guard.ok === false ? ` | guard: ${guard.reason || "blocked"}` : "";
+      autoReason.textContent = `${displaySymbol} | ${mode}${sizeText}: ${bot.lastReason || "No signal yet."}${guardText} (${router.confidence || 0}/${router.requiredVotes || 1} votes)`;
+      renderLifecycle(bot.orderLifecycle || {});
+      renderAnalytics(bot);
+      chartSignal.textContent = `Signal: ${bot.lastSignal || "WAIT"}`;
+      routerStatus.textContent = bot.lastSignal || "WAIT";
+      engineStatusFooter.textContent = bot.enabled ? "Running" : "Stopped";
+      lastCycle.textContent = bot.lastRunAt ? secondsAgo(Number(bot.lastRunAt) * 1000) : "Waiting";
+      const lastRun = bot.lastRunAt ? Number(bot.lastRunAt) * 1000 : 0;
+      const scanMs = Number(bot.scanSeconds || 30) * 1000;
+      const nextMs = lastRun ? Math.max(0, scanMs - (Date.now() - lastRun)) : scanMs;
+      nextScan.textContent = bot.enabled ? shortDuration(nextMs) : "Stopped";
+      const dailyRisk = bot.dailyRisk || {};
+      const lossUsed = Number(dailyRisk.lossUsed || 0);
+      const cap = Number(dailyRisk.dailyLossCapUsdt || bot.dailyLossCapUsdt || 0);
+      const capReached = cap > 0 && lossUsed >= cap;
+
+      dailyLossCap.textContent = `$${numberText(lossUsed, 2)} / $${numberText(cap, 2)}`;
+      maxOpenTrades.textContent = `${dailyRisk.tradesToday || 0} / ${dailyRisk.maxTradesPerDay || bot.maxTradesPerDay || 0}`;
+
+      const autoStartBtn = document.getElementById("autoStartBtn");
+      const startBtn = document.getElementById("startBtn");
+      const controlNotice = document.getElementById("controlNotice");
+      const riskUsedTag = document.getElementById("riskUsedTag");
+
+      if (capReached) {
+        if (autoStartBtn) autoStartBtn.disabled = true;
+        if (startBtn) startBtn.disabled = true;
+        if (controlNotice) {
+          controlNotice.textContent = "Daily loss cap reached. Trading locked for today.";
+          controlNotice.classList.add("locked");
+        }
+        if (riskUsedTag) {
+          riskUsedTag.textContent = "LOCKED";
+          riskUsedTag.style.backgroundColor = "rgba(255, 91, 110, 0.15)";
+          riskUsedTag.style.color = "var(--red)";
+          riskUsedTag.style.borderColor = "rgba(255, 91, 110, 0.35)";
+        }
+        if (dailyLossCap) {
+          dailyLossCap.style.color = "var(--red)";
+        }
+      } else {
+        if (autoStartBtn) autoStartBtn.disabled = false;
+        if (startBtn) startBtn.disabled = false;
+        if (controlNotice) {
+          controlNotice.classList.remove("locked");
+          if (controlNotice.textContent === "Daily loss cap reached. Trading locked for today.") {
+            controlNotice.textContent = "Bybit demo execution needs the local backend running on http://127.0.0.1:8787.";
+          }
+        }
+        if (riskUsedTag) {
+          riskUsedTag.textContent = "Live";
+          riskUsedTag.style.backgroundColor = "";
+          riskUsedTag.style.color = "";
+          riskUsedTag.style.borderColor = "";
+        }
+        if (dailyLossCap) {
+          dailyLossCap.style.color = "";
+        }
+      }
+      document.getElementById("dailyLossCapInput").value = bot.dailyLossCapUsdt || dailyRisk.dailyLossCapUsdt || 25;
+      document.getElementById("maxTradesPerDay").value = bot.maxTradesPerDay || dailyRisk.maxTradesPerDay || 5;
+      document.getElementById("breakevenTrigger").value = bot.breakevenTriggerPct || 0.6;
+      document.getElementById("partialTpTrigger").value = bot.partialTpTriggerPct || 1.0;
+      document.getElementById("partialTpClose").value = bot.partialTpClosePct || 50;
+      document.getElementById("trailingTrigger").value = bot.trailingStopTriggerPct || 0.8;
+      document.getElementById("trailingDistance").value = bot.trailingStopDistancePct || 0.35;
+      tmBreakeven.textContent = `${bot.breakevenTriggerPct || 0.6}%`;
+      tmPartial.textContent = `${bot.partialTpTriggerPct || 1.0}% / close ${bot.partialTpClosePct || 50}%`;
+      tmTrailing.textContent = `${bot.trailingStopTriggerPct || 0.8}% / distance ${bot.trailingStopDistancePct || 0.35}%`;
+      tmLastResult.textContent = (bot.tradeManagement || {}).reason || "Waiting";
+      const overview = bot.engineOverview || {};
+      const status = overview.status || bot.engineStatus || {};
+      engineMarketData.textContent = status.marketData || "idle";
+      engineIndicator.textContent = status.indicator || "idle";
+      engineStrategy.textContent = status.strategy || "idle";
+      engineRouter.textContent = status.router || "idle";
+      engineRisk.textContent = status.risk || "idle";
+      engineTradeManagement.textContent = status.tradeManagement || "idle";
+      engineJournal.textContent = status.journal || "idle";
+      botEngineVersion.textContent = overview.version ? `v${overview.version}${overview.runtime ? ` ${overview.runtime}` : ""}` : "V2";
+      if (bot.mode) document.getElementById("routerMode").value = bot.mode;
+      if (Array.isArray(bot.engineVotes) && bot.engineVotes.length) {
+        signalVoteTag.textContent = `${bot.engineVotes.length} engines`;
+        renderVoteGrid(engineGrid, bot.engineVotes);
+        renderVoteGrid(signalVoteGrid, bot.engineVotes);
+      }
+    }
+
+    async function refreshBotStatus() {
+      try {
+        const result = await api("/api/bot/status");
+        if (result.ok) renderBotStatus(result.bot);
+      } catch (error) {
+        autoReason.textContent = "Could not refresh auto trader status.";
+      }
+    }
+
+    async function runReplay() {
+      const symbol = (replaySymbol.value || activeSymbol()).trim().toUpperCase();
+      const horizon = replayHorizon.value || "24h";
+      const mode = document.getElementById("routerMode").value;
+      const stopLossPct = Number(document.getElementById("stop").value || 0.8);
+      const takeProfitPct = Number(document.getElementById("take").value || 1.6);
+      replayResultTag.textContent = "Running";
+      replayResult.innerHTML = `<p class="page-note">Running ${horizon} strategy replay for ${symbol}...</p>`;
+      try {
+        const result = await api(`/api/bot/replay?symbol=${encodeURIComponent(symbol)}&horizon=${encodeURIComponent(horizon)}&mode=${encodeURIComponent(mode)}&stopLossPct=${encodeURIComponent(stopLossPct)}&takeProfitPct=${encodeURIComponent(takeProfitPct)}`);
+        if (!result.ok) {
+          replayResultTag.textContent = "No data";
+          replayResult.innerHTML = `<p class="page-note">${result.message || "Replay unavailable."}</p>`;
+          return;
+        }
+        const summary = result.summary || {};
+        const votes = result.votesByEngine || {};
+        const trades = result.trades || [];
+        replayResultTag.textContent = `${summary.trades || 0} trades`;
+        const voteRows = Object.entries(votes).map(([engine, counts]) => `
+          <tr><td>${engine}</td><td>${counts.Buy || 0}</td><td>${counts.Sell || 0}</td><td>${counts.WAIT || 0}</td></tr>
+        `).join("");
+        const tradeRows = trades.slice(-25).reverse().map((trade) => `
+          <tr>
+            <td>${new Date(Number(trade.time || 0)).toLocaleString()}</td>
+            <td class="${trade.side === "Buy" ? "green" : "red"}">${trade.side}</td>
+            <td class="right">${numberText(trade.entry, 6)}</td>
+            <td class="right">${numberText(trade.exit, 6)}</td>
+            <td class="${trade.outcome === "win" ? "green" : trade.outcome === "loss" ? "red" : ""}">${trade.outcome}</td>
+            <td class="right">${numberText(trade.pnlPct, 2)}%</td>
+          </tr>
+        `).join("");
+        replayResult.innerHTML = `
+          <div class="exchange-grid">
+            <div class="exchange-item"><span>Symbol</span><strong>${symbol}</strong></div>
+            <div class="exchange-item"><span>Range</span><strong>${result.horizon}</strong></div>
+            <div class="exchange-item"><span>Candles</span><strong>${result.candles}</strong></div>
+            <div class="exchange-item"><span>Trades</span><strong>${summary.trades || 0}</strong></div>
+            <div class="exchange-item"><span>Win / Loss</span><strong>${summary.wins || 0} / ${summary.losses || 0}</strong></div>
+            <div class="exchange-item"><span>Win rate</span><strong>${numberText(summary.winRate || 0, 2)}%</strong></div>
+            <div class="exchange-item"><span>Estimated PnL</span><strong class="${(summary.estimatedPnlPct || 0) >= 0 ? "green" : "red"}">${numberText(summary.estimatedPnlPct || 0, 2)}%</strong></div>
+          </div>
+          <div class="table-wrap" style="margin-top:12px">
+            <table><thead><tr><th>Engine</th><th>Buy votes</th><th>Sell votes</th><th>Wait</th></tr></thead><tbody>${voteRows || `<tr><td colspan="4" class="muted">No votes</td></tr>`}</tbody></table>
+          </div>
+          <div class="table-wrap" style="margin-top:12px">
+            <table><thead><tr><th>Time</th><th>Side</th><th class="right">Entry</th><th class="right">Exit</th><th>Result</th><th class="right">PnL</th></tr></thead><tbody>${tradeRows || `<tr><td colspan="6" class="muted">No trades matched replay rules</td></tr>`}</tbody></table>
+          </div>
+        `;
+      } catch (error) {
+        replayResultTag.textContent = "Error";
+        replayResult.innerHTML = `<p class="page-note">Replay request failed: ${error.message}</p>`;
+      }
+    }
+
+    async function refreshJournal() {
+      try {
+        const result = await api("/api/bot/journal?limit=100");
+        if (result.ok) renderJournal(result.journal);
+      } catch (error) {
+        renderJournal([]);
+      }
+    }
+
+    document.getElementById("autoStartBtn").addEventListener("click", async () => {
+      const interval = intervalForUi(document.getElementById("timeframe").value);
+      const stopLossPct = Number(document.getElementById("stop").value || 0.8);
+      const takeProfitPct = Number(document.getElementById("take").value || 1.6);
+      const maxAllocationUsdt = Number(document.getElementById("allocation").value || 250);
+      const riskPerTradePct = Number(document.getElementById("riskPerTrade").value || 0.25);
+      const maxOpenPositions = Number(document.getElementById("maxOpenPositions").value || 1);
+      const dailyLossCapUsdt = Number(document.getElementById("dailyLossCapInput").value || 25);
+      const maxTradesPerDay = Number(document.getElementById("maxTradesPerDay").value || 6);
+      const breakevenTriggerPct = Number(document.getElementById("breakevenTrigger").value || 0.6);
+      const partialTpTriggerPct = Number(document.getElementById("partialTpTrigger").value || 1.4);
+      const partialTpClosePct = Number(document.getElementById("partialTpClose").value || 40);
+      const trailingStopTriggerPct = Number(document.getElementById("trailingTrigger").value || 1.8);
+      const trailingStopDistancePct = Number(document.getElementById("trailingDistance").value || 0.45);
+      const mode = document.getElementById("routerMode").value;
+      notice.textContent = "Starting auto trader with top-gainer best-signal scan...";
+      try {
+        const result = await api("/api/bot/start", {
+          method: "POST",
+          body: JSON.stringify({
+            interval,
+            qty: "auto",
+            stopLossPct,
+            takeProfitPct,
+            maxAllocationUsdt,
+            riskPerTradePct,
+            maxOpenPositions,
+            dailyLossCapUsdt,
+            maxTradesPerDay,
+            breakevenEnabled: true,
+            breakevenTriggerPct,
+            partialTpEnabled: true,
+            partialTpTriggerPct,
+            partialTpClosePct,
+            trailingStopEnabled: false,
+            trailingStopTriggerPct,
+            trailingStopDistancePct,
+            cooldownSeconds: 180,
+            mode
+          })
+        });
+        if (result.ok) {
+          renderBotStatus(result.bot);
+          const count = ((result.bot.universe || {}).symbols || []).length || 10;
+          notice.textContent = `Auto trader running in ${mode} mode across top ${count} gainers.`;
+          appendLog(`Auto trader started in ${mode} mode across top ${count} gainers.`);
+        } else {
+          notice.textContent = "Auto trader start failed.";
+        }
+      } catch (error) {
+        if (error.message.includes("Unauthorized")) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+        } else {
+          notice.textContent = `Backend request failed: ${error.message}`;
+        }
+      }
+    });
+
+    document.getElementById("autoStopBtn").addEventListener("click", async () => {
+      notice.textContent = "Stopping auto trader...";
+      try {
+        const result = await api("/api/bot/stop", { method: "POST", body: "{}" });
+        if (result.ok) {
+          renderBotStatus(result.bot);
+          notice.textContent = "Auto trader stopped.";
+          appendLog("Auto trader stopped.");
+        }
+      } catch (error) {
+        if (error.message.includes("Unauthorized")) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+        } else {
+          notice.textContent = `Backend request failed: ${error.message}`;
+        }
+      }
+    });
+
+    document.getElementById("manageStopsBtn").addEventListener("click", async () => {
+      notice.textContent = "Managing open position stops...";
+      try {
+        const result = await api("/api/bot/manage-positions", { method: "POST", body: "{}" });
+        const actions = ((result.result || {}).actions || []).length;
+        notice.textContent = actions ? `Trade manager updated ${actions} stop order(s).` : "Trade manager checked positions; no stop update needed.";
+        appendLog(`Trade manager checked positions; actions: ${actions}.`);
+        await refreshJournal();
+      } catch (error) {
+        if (error.message.includes("Unauthorized")) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+        } else {
+          notice.textContent = `Backend request failed: ${error.message}`;
+        }
+      }
+    });
+
+    document.getElementById("startBtn").addEventListener("click", async () => {
+      const manualSymbolInput = document.getElementById("manualTestSymbol");
+      const symbol = manualSymbolInput ? manualSymbolInput.value.trim().toUpperCase() : activeSymbol();
+      const stopLossPct = Number(document.getElementById("stop").value || 0.8);
+      const takeProfitPct = Number(document.getElementById("take").value || 1.6);
+      notice.textContent = `Submitting tiny Bybit demo market buy for ${symbol} with SL/TP...`;
+      try {
+        const result = await api("/api/bybit/demo-order", {
+          method: "POST",
+          body: JSON.stringify({ confirmDemoOrder: true, symbol, side: "Buy", qty: "0.001", stopLossPct, takeProfitPct })
+        });
+        if (result.retCode === 0) {
+          notice.textContent = `Demo order accepted. Order ID: ${result.result.orderId || "pending"}`;
+          appendLog(`Bybit demo order accepted for ${symbol}.`);
+        } else {
+          notice.textContent = `Bybit rejected demo order: ${result.retMsg || "Unknown error"}`;
+          appendLog(`Demo order rejected for ${symbol}: ${result.retMsg || "Unknown error"}.`);
+        }
+      } catch (error) {
+        if (error.message.includes("Unauthorized")) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+        } else {
+          notice.textContent = `Backend request failed: ${error.message}`;
+          appendLog(`Backend request failed while placing demo order.`);
+        }
+      }
+    });
+
+    document.getElementById("killBtn").addEventListener("click", async () => {
+      notice.textContent = "Cancelling open orders and closing all open positions...";
+      try {
+        const result = await api("/api/bybit/kill-switch", {
+          method: "POST",
+          body: JSON.stringify({ symbol: activeSymbol() })
+        });
+        if (result.retMsg === "No open positions to close.") {
+          const msg = "No open positions to close.";
+          notice.textContent = msg;
+          appendLog(msg);
+        } else if (result.retCode === 0) {
+          const symbols = (result.closedSymbols && result.closedSymbols.length) ? result.closedSymbols.join(", ") : "";
+          const msg = symbols ? `Kill switch closed ${symbols}.` : "Kill switch closed open positions.";
+          notice.textContent = msg;
+          appendLog(msg);
+        } else {
+          notice.textContent = `Kill switch failed: ${result.retMsg || "Unknown error"}`;
+          appendLog(`Kill switch failed: ${result.retMsg || "Unknown error"}.`);
+        }
+      } catch (error) {
+        if (error.message.includes("Unauthorized")) {
+          notice.textContent = "Unauthorized: admin token missing or invalid.";
+        } else {
+          notice.textContent = `Backend request failed: ${error.message}`;
+          appendLog(`Backend request failed while sending kill switch.`);
+        }
+      }
+    });
+    document.getElementById("paperMode").addEventListener("click", () => {
+      notice.textContent = "Bybit demo mode selected for test execution with demo funds.";
+    });
+    document.getElementById("liveMode").addEventListener("click", () => {
+      notice.textContent = "Real trading remains locked. Use demo first, then add stronger server-side risk checks.";
+    });
+    function showPage(page) {
+      document.body.classList.remove("dashboard-view", "control-view", "page-dashboard", "page-scanner", "page-trades", "page-analytics", "page-backtest", "page-settings");
+      document.body.classList.add(`page-${page}`);
+      document.body.classList.add(page === "settings" ? "control-view" : "dashboard-view");
+      pageTabs.forEach((tab) => tab.setAttribute("aria-pressed", tab.dataset.page === page ? "true" : "false"));
+      if (page === "dashboard" || page === "scanner" || page === "trades" || page === "analytics" || page === "backtest") refreshLiveData();
+      refreshBotStatus();
+      refreshJournal();
+    }
+
+    pageTabs.forEach((tab) => {
+      tab.addEventListener("click", () => showPage(tab.dataset.page || "dashboard"));
+    });
+    document.getElementById("runReplayBtn").addEventListener("click", runReplay);
+    exportJournalBtn.addEventListener("click", exportJournalCsv);
+    manageStopsBtnPage.addEventListener("click", () => document.getElementById("manageStopsBtn").click());
+    document.getElementById("timeframe").addEventListener("change", refreshLiveData);
+    document.getElementById("routerMode").addEventListener("change", refreshScanner);
+    checkBackend();
+    refreshBotStatus();
+    refreshJournal();
+    refreshLiveData();
+    setInterval(refreshLiveData, 15000);
+    setInterval(refreshBotStatus, 10000);
+    setInterval(refreshJournal, 10000);
+  </script>
+</body>
+</html>

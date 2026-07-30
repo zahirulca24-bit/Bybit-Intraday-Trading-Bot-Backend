@@ -1,0 +1,132 @@
+name: Replay Performance Journal CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/replay_performance_journal.py"
+      - "backend/secure_server.py"
+      - "backend/replay_safety.py"
+      - "backend/replay_storage.py"
+      - "backend/postgres_state_store.py"
+      - "backend/tests/test_replay_performance_journal.py"
+      - "backend/tests/replay_performance_journal_postgres_check.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-performance-journal-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/replay_performance_journal.py"
+      - "backend/secure_server.py"
+      - "backend/replay_safety.py"
+      - "backend/replay_storage.py"
+      - "backend/postgres_state_store.py"
+      - "backend/tests/test_replay_performance_journal.py"
+      - "backend/tests/replay_performance_journal_postgres_check.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-performance-journal-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  replay-performance-journal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: replay
+          POSTGRES_PASSWORD: replay
+          POSTGRES_DB: replay_performance_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replay -d replay_performance_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replay:replay@localhost:5432/replay_performance_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile replay analytics runtime
+        run: |
+          python -m compileall -q \
+            backend/replay_performance_journal.py \
+            backend/secure_server.py \
+            backend/replay_safety.py \
+            backend/replay_storage.py \
+            backend/postgres_state_store.py
+
+      - name: Run replay regression tests
+        run: |
+          python -m pytest \
+            tests/test_replay_safety.py \
+            backend/tests/test_replay_storage.py \
+            backend/tests/test_replay_sessions.py \
+            backend/tests/test_replay_engine.py \
+            backend/tests/test_replay_strategy_risk.py \
+            backend/tests/test_replay_simulated_execution.py \
+            backend/tests/test_replay_performance_journal.py \
+            -q
+
+      - name: Verify PostgreSQL performance and journal API
+        run: python -m backend.tests.replay_performance_journal_postgres_check
+
+      - name: Verify read-only exchange isolation
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import ast
+
+          path = Path("backend/replay_performance_journal.py")
+          source = path.read_text(encoding="utf-8")
+          tree = ast.parse(source)
+          banned_imports = {
+              "ccxt",
+              "requests",
+              "httpx",
+              "urllib.request",
+              "backend.execution_handoff",
+              "backend.guarded_server",
+              "backend.position_synced_server",
+          }
+          imported = set()
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Import):
+                  imported.update(alias.name for alias in node.names)
+              elif isinstance(node, ast.ImportFrom):
+                  imported.add(node.module or "")
+          assert not any(
+              module == banned or module.startswith(f"{banned}.")
+              for module in imported
+              for banned in banned_imports
+          ), imported
+          for token in (
+              "api-demo.bybit.com",
+              "/v5/order/",
+              "/v5/position/",
+              "bybit_request(",
+              "submit_order(",
+              "place_order(",
+          ):
+              assert token not in source, token
+          PY

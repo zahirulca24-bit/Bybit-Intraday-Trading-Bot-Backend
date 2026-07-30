@@ -1,0 +1,260 @@
+name: Replay PostgreSQL CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/postgres_state_store.py"
+      - "backend/replay_storage.py"
+      - "backend/tests/test_replay_storage.py"
+      - ".github/workflows/replay-postgres-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/postgres_state_store.py"
+      - "backend/replay_storage.py"
+      - "backend/tests/test_replay_storage.py"
+      - ".github/workflows/replay-postgres-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  replay-postgres:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: replay
+          POSTGRES_PASSWORD: replay
+          POSTGRES_DB: replay_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replay -d replay_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replay:replay@localhost:5432/replay_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile replay storage
+        run: python -m compileall -q backend/postgres_state_store.py backend/replay_storage.py
+
+      - name: Run replay storage unit tests
+        run: python -m pytest backend/tests/test_replay_storage.py -q
+
+      - name: Apply migration and verify replay CRUD
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          from uuid import uuid4
+
+          from backend.postgres_state_store import PostgresStateStore
+          from backend.replay_storage import ReplayStorageValidationError
+
+          store = PostgresStateStore()
+          status = store.status()
+          assert status["ok"] is True, status
+          assert status["migrationVersion"] >= 2, status
+
+          symbol = "BTCUSDT"
+          timeframe = "5"
+          open_time = 1_785_000_000_000
+          end_time = open_time + 600_000
+          inserted = store.upsert_replay_candles(
+              [
+                  {
+                      "symbol": symbol,
+                      "timeframe": timeframe,
+                      "open_time": open_time,
+                      "open": "100",
+                      "high": "102",
+                      "low": "99",
+                      "close": "101",
+                      "volume": "25",
+                      "turnover": "2510",
+                  }
+              ]
+          )
+          assert inserted == 1
+          coverage = store.replay_candle_coverage(symbol, timeframe)
+          assert coverage["count"] == 1, coverage
+          candles = store.get_replay_candles(
+              symbol,
+              timeframe,
+              open_time,
+              open_time,
+          )
+          assert len(candles) == 1
+          assert candles[0]["close"] == "101.000000000000000000"
+
+          session_id = f"replay_{uuid4().hex}"
+          session_result = store.create_replay_session(
+              {
+                  "session_id": session_id,
+                  "symbol": symbol,
+                  "timeframe": timeframe,
+                  "start_time": open_time,
+                  "end_time": end_time,
+                  "initial_balance": "1000",
+                  "strategy_mode": "conservative",
+                  "config": {"executionMode": "simulated_only"},
+              }
+          )
+          assert session_result["created"] is True, session_result
+          session = store.get_replay_session(session_id)
+          assert session is not None
+          assert session["status"] == "READY"
+
+          assert store.append_replay_event(
+              session_id,
+              0,
+              "session.created",
+              {"source": "ci"},
+              open_time,
+          ) is True
+          assert store.append_replay_event(
+              session_id,
+              0,
+              "session.created",
+              {"source": "duplicate"},
+              open_time,
+          ) is False
+          events = store.list_replay_events(session_id)
+          assert len(events) == 1
+
+          trade_id = f"trade_{uuid4().hex}"
+          store.upsert_replay_trade(
+              {
+                  "trade_id": trade_id,
+                  "session_id": session_id,
+                  "symbol": symbol,
+                  "side": "Buy",
+                  "status": "OPEN",
+                  "entry_time": open_time,
+                  "entry_price": "100",
+                  "quantity": "1",
+              }
+          )
+          store.upsert_replay_trade(
+              {
+                  "trade_id": trade_id,
+                  "session_id": session_id,
+                  "symbol": symbol,
+                  "side": "Buy",
+                  "status": "CLOSED",
+                  "entry_time": open_time,
+                  "entry_price": "100",
+                  "exit_time": open_time + 300_000,
+                  "exit_price": "102",
+                  "quantity": "1",
+                  "realized_pnl": "2",
+                  "fees": "0.10",
+              }
+          )
+          trades = store.list_replay_trades(session_id)
+          assert len(trades) == 1
+          assert trades[0]["status"] == "CLOSED"
+          assert trades[0]["realizedPnl"] == "2.000000000000000000"
+
+          second_session_id = f"replay_{uuid4().hex}"
+          second_result = store.create_replay_session(
+              {
+                  "session_id": second_session_id,
+                  "symbol": symbol,
+                  "timeframe": timeframe,
+                  "start_time": open_time,
+                  "end_time": end_time,
+                  "initial_balance": "2000",
+                  "strategy_mode": "balanced",
+              }
+          )
+          assert second_result["created"] is True
+          store.upsert_replay_trade(
+              {
+                  "trade_id": trade_id,
+                  "session_id": second_session_id,
+                  "symbol": symbol,
+                  "side": "Sell",
+                  "status": "OPEN",
+                  "entry_time": open_time,
+                  "entry_price": "100",
+                  "quantity": "2",
+              }
+          )
+          first_session_trades = store.list_replay_trades(session_id)
+          second_session_trades = store.list_replay_trades(second_session_id)
+          assert len(first_session_trades) == 1
+          assert len(second_session_trades) == 1
+          assert first_session_trades[0]["status"] == "CLOSED"
+          assert first_session_trades[0]["side"] == "Buy"
+          assert second_session_trades[0]["status"] == "OPEN"
+          assert second_session_trades[0]["side"] == "Sell"
+
+          updated = store.update_replay_session_state(
+              session_id,
+              status="COMPLETED",
+              cursor_time=open_time + 300_000,
+              balance="1001.90",
+              equity="1001.90",
+              summary={"trades": 1, "netPnl": "1.90"},
+          )
+          assert updated is True
+          completed = store.get_replay_session(session_id)
+          assert completed is not None
+          assert completed["status"] == "COMPLETED"
+          assert completed["balance"] == "1001.900000000000000000"
+          assert completed["summary"] == {"trades": 1, "netPnl": "1.90"}
+
+          preserved = store.update_replay_session_state(
+              session_id,
+              status="PAUSED",
+              cursor_time=open_time + 300_000,
+              balance="1001.90",
+              equity="1001.90",
+              summary=None,
+          )
+          assert preserved is True
+          paused = store.get_replay_session(session_id)
+          assert paused is not None
+          assert paused["summary"] == {"trades": 1, "netPnl": "1.90"}
+
+          try:
+              store.update_replay_session_state(
+                  session_id,
+                  status="RUNNING",
+                  cursor_time=end_time + 1,
+                  balance="1001.90",
+                  equity="1001.90",
+              )
+          except ReplayStorageValidationError as exc:
+              assert "inside the session range" in str(exc)
+          else:
+              raise AssertionError("Out-of-range replay cursor was accepted")
+
+          unchanged = store.get_replay_session(session_id)
+          assert unchanged is not None
+          assert unchanged["status"] == "PAUSED"
+          assert unchanged["cursorTime"] == open_time + 300_000
+          PY

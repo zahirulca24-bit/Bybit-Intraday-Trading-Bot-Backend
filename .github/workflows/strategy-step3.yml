@@ -1,0 +1,28 @@
+name: Strategy Step 3 CI
+
+on:
+  pull_request:
+    paths:
+      - 'backend/strategy_step3_upgrade.py'
+      - 'backend/runtime_orchestrator.py'
+      - 'tests/test_strategy_step3_upgrade.py'
+      - '.github/workflows/strategy-step3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-step3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Run Step 3 tests
+        run: python -m pytest -q tests/test_strategy_step3_upgrade.py
+      - name: Compile runtime modules
+        run: python -m py_compile backend/strategy_step3_upgrade.py backend/runtime_orchestrator.py

@@ -1,0 +1,59 @@
+name: Execution guard verification
+
+on:
+  pull_request:
+    paths:
+      - "backend/guarded_server.py"
+      - "backend/secure_server.py"
+      - "backend/state_store.py"
+      - "backend/execution_idempotency.py"
+      - "backend/execution_idempotency_race_fix.py"
+      - "backend/execution_idempotency_review_fix.py"
+      - "backend/tests/test_execution_concurrency_guard.py"
+      - "tests/test_execution_idempotency.py"
+      - "tests/test_execution_idempotency_race_fix.py"
+      - "tests/test_execution_idempotency_review_fix.py"
+      - "tests/test_secure_server_idempotency_install.py"
+      - "render.yaml"
+      - ".github/workflows/execution-guard.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-execution-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: python -m pip install pytest
+
+      - name: Run execution safety tests
+        run: |
+          python -m pytest -q \
+            backend/tests/test_execution_concurrency_guard.py \
+            tests/test_execution_idempotency.py \
+            tests/test_execution_idempotency_race_fix.py \
+            tests/test_execution_idempotency_review_fix.py \
+            tests/test_secure_server_idempotency_install.py
+
+      - name: Compile guarded and canonical runtimes
+        run: |
+          python -m py_compile backend/guarded_server.py
+          python -m py_compile backend/secure_server.py
+          python -m py_compile backend/state_store.py
+          python -m py_compile backend/execution_idempotency.py
+          python -m py_compile backend/execution_idempotency_race_fix.py
+          python -m py_compile backend/execution_idempotency_review_fix.py
+
+      - name: Validate canonical Render entrypoint
+        run: |
+          grep -F 'startCommand: python backend/secure_server.py' render.yaml

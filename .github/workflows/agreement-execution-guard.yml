@@ -1,0 +1,44 @@
+name: Agreement Execution Guard CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/agreement_contract_filter.py"
+      - "backend/agreement_execution_guard.py"
+      - "backend/secure_server.py"
+      - "tests/test_agreement_execution_guard.py"
+      - ".github/workflows/agreement-execution-guard.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/agreement_contract_filter.py"
+      - "backend/agreement_execution_guard.py"
+      - "backend/secure_server.py"
+      - "tests/test_agreement_execution_guard.py"
+      - ".github/workflows/agreement-execution-guard.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-agreement-execution-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: python -m pip install pytest
+
+      - name: Run focused agreement execution guard tests
+        run: python -m pytest -q tests/test_agreement_execution_guard.py
+
+      - name: Compile guard and canonical runtime
+        run: python -m py_compile backend/agreement_execution_guard.py backend/secure_server.py

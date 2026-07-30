@@ -1,0 +1,28 @@
+name: Batch 1 Execution Safety
+
+on:
+  pull_request:
+    paths:
+      - "backend/batch1_safety.py"
+      - "backend/guarded_server.py"
+      - "backend/tests/test_batch1_execution_safety.py"
+      - ".github/workflows/batch1-execution-safety.yml"
+  push:
+    branches: [main]
+    paths:
+      - "backend/batch1_safety.py"
+      - "backend/guarded_server.py"
+      - "backend/tests/test_batch1_execution_safety.py"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile guarded runtime
+        run: python -m py_compile backend/batch1_safety.py backend/guarded_server.py
+      - name: Run focused regression tests
+        run: python -m unittest backend.tests.test_batch1_execution_safety -v

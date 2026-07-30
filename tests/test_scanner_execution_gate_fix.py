@@ -1,0 +1,77 @@
+from __future__ import annotations
+
+import types
+
+import pytest
+
+from backend import scanner_execution_gate, intraday_scanner
+
+
+class DummyEngine:
+    def __init__(self):
+        self.status = {}
+        self.risk_calls = []
+
+    def set_status(self, *args):
+        pass
+
+    def risk_check(self, state, signal):
+        # original risk_check returns True by default for this test
+        self.risk_calls.append((state, signal))
+        return True, "ok"
+
+
+class DummyCore:
+    def __init__(self):
+        self.engine = DummyEngine()
+        # represent a freshly-signalled symbol
+        self._current_scanner_signal = {"symbol": "BTCUSDT", "signal": "Buy", "votes": []}
+
+    def get_bot_engine(self):
+        return self.engine
+
+    # These are required by scanner_execution_gate.install: keep minimal stubs
+    def top_gainer_universe(self, *args, **kwargs):
+        return {"symbols": [], "rows": []}
+
+
+def test_execution_gate_refreshes_universe_on_miss(monkeypatch):
+    """Reproducer: if the cached universe is stale (missing symbol), the gate
+    should attempt a refresh and allow execution when the fresh universe
+    contains the symbol.
+
+    Before the fix this test fails because the gate only used a stale cached
+    universe and blocks the signal. The test installs the real execution gate
+    and monkeypatches intraday_scanner.build_universe to simulate stale vs
+    fresh responses.
+    """
+
+    core = DummyCore()
+    engine = core.get_bot_engine()
+
+    calls = []
+
+    def build_universe_stub(core_arg, force=False, limit=None):
+        # record calls for assertion
+        calls.append(bool(force))
+        if not force:
+            # stale cached universe: missing our symbol
+            return {"symbols": [], "rows": []}
+        # fresh universe: includes the recently-signalled symbol
+        return {"symbols": ["BTCUSDT"], "rows": [{"symbol": "BTCUSDT", "costTier": "normal"}]}
+
+    monkeypatch.setattr(intraday_scanner, "build_universe", build_universe_stub)
+
+    # Install the execution gate (it will wrap engine.risk_check)
+    scanner_execution_gate.install(core)
+
+    # Call the patched risk_check (this is the real installed gate)
+    state = {"symbol": "BTCUSDT"}
+    allowed, reason = engine.risk_check(state, "Buy")
+
+    assert calls, "build_universe was not called"
+    # Expect at least one non-forced call and then a forced refresh
+    assert calls[0] is False
+    assert True in calls, "expected a forced refresh when the symbol was missing"
+
+    assert allowed is True, f"Expected allowed after refresh; blocked with reason: {reason}"

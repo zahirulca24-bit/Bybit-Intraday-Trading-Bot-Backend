@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: bybit-intraday-trading-bot
+    env: python
+    plan: free
+    buildCommand: python scripts/apply_sidebar_ui.py && python scripts/apply_compact_settings.py && python scripts/apply_button_state_ui.py && pip install -r requirements.txt
+    startCommand: python backend/secure_server.py
+    envVars:
+      - key: BYBIT_BASE_URL
+        value: https://api-demo.bybit.com

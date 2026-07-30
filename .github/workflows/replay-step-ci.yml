@@ -1,0 +1,374 @@
+name: Replay Candle Step CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/replay_engine.py"
+      - "backend/replay_step_repository.py"
+      - "backend/replay_safety.py"
+      - "backend/replay_sessions.py"
+      - "backend/replay_session_repository.py"
+      - "backend/replay_storage.py"
+      - "backend/postgres_state_store.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_engine.py"
+      - "backend/tests/test_replay_sessions.py"
+      - "backend/tests/test_replay_storage.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-step-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/replay_engine.py"
+      - "backend/replay_step_repository.py"
+      - "backend/replay_safety.py"
+      - "backend/replay_sessions.py"
+      - "backend/replay_session_repository.py"
+      - "backend/replay_storage.py"
+      - "backend/postgres_state_store.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_engine.py"
+      - "backend/tests/test_replay_sessions.py"
+      - "backend/tests/test_replay_storage.py"
+      - "tests/test_replay_safety.py"
+      - ".github/workflows/replay-step-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  replay-candle-step:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: replay
+          POSTGRES_PASSWORD: replay
+          POSTGRES_DB: replay_step_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replay -d replay_step_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replay:replay@localhost:5432/replay_step_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile replay candle-step runtime
+        run: >-
+          python -m compileall -q
+          backend/replay_engine.py
+          backend/replay_step_repository.py
+          backend/replay_sessions.py
+          backend/replay_session_repository.py
+          backend/replay_storage.py
+          backend/postgres_state_store.py
+          backend/secure_server.py
+
+      - name: Run replay regression tests
+        run: |
+          python -m pytest \
+            tests/test_replay_safety.py \
+            backend/tests/test_replay_storage.py \
+            backend/tests/test_replay_collector.py \
+            backend/tests/test_replay_sessions.py \
+            backend/tests/test_replay_engine.py \
+            -q
+
+      - name: Verify atomic PostgreSQL candle advancement
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          from decimal import Decimal
+          from uuid import uuid4
+
+          from backend.postgres_state_store import PostgresStateStore
+          from backend.replay_engine import (
+              CandleReplayEngine,
+              ReplayEngineConflictError,
+              ReplayEngineDataIncompleteError,
+          )
+          from backend.replay_session_repository import create_session, reset_session
+
+
+          store = PostgresStateStore()
+          status = store.status()
+          assert status["ok"] is True, status
+          assert status["migrationVersion"] >= 3, status
+
+          symbol = "BTCUSDT"
+          timeframe = "5"
+          interval = 300_000
+          start = 1_800_000_000_000
+          end = start + (4 * interval)
+          candles = []
+          for index in range(5):
+              close = 100 + index
+              candles.append(
+                  {
+                      "symbol": symbol,
+                      "timeframe": timeframe,
+                      "open_time": start + (index * interval),
+                      "open": "100",
+                      "high": str(max(102, close + 1)),
+                      "low": "99",
+                      "close": str(close),
+                      "volume": str(25 + index),
+                      "turnover": str((25 + index) * close),
+                      "source": "ci_fixture",
+                  }
+              )
+          assert store.upsert_replay_candles(candles) == 5
+
+          session_id = f"replay_{uuid4().hex}"
+          created = create_session(
+              store,
+              {
+                  "session_id": session_id,
+                  "symbol": symbol,
+                  "timeframe": timeframe,
+                  "status": "READY",
+                  "start_time": start,
+                  "end_time": end,
+                  "cursor_time": None,
+                  "initial_balance": "1000",
+                  "balance": "1000",
+                  "equity": "1000",
+                  "strategy_mode": "balanced",
+                  "config": {
+                      "runtimeMode": "historical_replay",
+                      "executionMode": "simulated_only",
+                      "externalExecutionAllowed": False,
+                  },
+                  "summary": {},
+              },
+              {"source": "replay_step_ci"},
+          )
+          assert created["created"] is True
+          assert created["candleSnapshotCount"] == 5
+          with store.connect() as db:
+              with db.cursor() as cur:
+                  cur.execute(
+                      "SELECT COUNT(*) FROM replay_session_candles WHERE session_id=%s",
+                      (session_id,),
+                  )
+                  assert int(cur.fetchone()[0]) == 5
+
+          engine = CandleReplayEngine(store)
+          first_request = {
+              "sessionId": session_id,
+              "requestId": "step_ci_0001",
+              "steps": 2,
+              "expectedCursorTime": None,
+          }
+          first = engine.step(first_request)
+          assert first["processedSteps"] == 2, first
+          assert first["cursorTime"] == start + interval, first
+          assert first["session"]["status"] == "PAUSED", first
+          assert first["candleSource"] == "session_snapshot"
+          assert first["strategyEvaluated"] is False
+          assert first["executionSimulated"] is False
+          assert first["externalExecutionAllowed"] is False
+
+          events_after_first = store.list_replay_events(session_id, limit=100)
+          retry = engine.step(first_request)
+          assert retry["idempotent"] is True, retry
+          assert retry["cursorTime"] == first["cursorTime"]
+          assert store.list_replay_events(session_id, limit=100) == events_after_first
+
+          try:
+              engine.step({**first_request, "steps": 1})
+          except ReplayEngineConflictError as exc:
+              assert "different replay step parameters" in str(exc)
+          else:
+              raise AssertionError("requestId reuse with different parameters was accepted")
+
+          try:
+              engine.step(
+                  {
+                      "sessionId": session_id,
+                      "requestId": "step_ci_stale",
+                      "steps": 1,
+                      "expectedCursorTime": None,
+                  }
+              )
+          except ReplayEngineConflictError as exc:
+              assert exc.details["actualCursorTime"] == first["cursorTime"]
+          else:
+              raise AssertionError("stale replay cursor was accepted")
+
+          store.upsert_replay_candles(
+              [
+                  {
+                      "symbol": symbol,
+                      "timeframe": timeframe,
+                      "open_time": start + (index * interval),
+                      "open": "100",
+                      "high": "1000",
+                      "low": "99",
+                      "close": "999",
+                      "volume": "999",
+                      "turnover": "998001",
+                      "source": "forced_refresh_fixture",
+                  }
+                  for index in (2, 3, 4)
+              ]
+          )
+
+          second = engine.step(
+              {
+                  "sessionId": session_id,
+                  "requestId": "step_ci_0002",
+                  "steps": 2,
+                  "expectedCursorTime": first["cursorTime"],
+              }
+          )
+          assert second["processedSteps"] == 2
+          assert second["cursorTime"] == start + (3 * interval)
+          assert second["completed"] is False
+          assert [Decimal(candle["close"]) for candle in second["candles"]] == [
+              Decimal("102"),
+              Decimal("103"),
+          ]
+          assert all(candle["source"] == "ci_fixture" for candle in second["candles"])
+
+          final = engine.step(
+              {
+                  "sessionId": session_id,
+                  "requestId": "step_ci_0003",
+                  "steps": 100,
+                  "expectedCursorTime": second["cursorTime"],
+              }
+          )
+          assert final["processedSteps"] == 1
+          assert final["cursorTime"] == end
+          assert Decimal(final["candles"][0]["close"]) == Decimal("104")
+          assert final["completed"] is True
+          assert final["session"]["status"] == "COMPLETED"
+          assert final["session"]["summary"]["processedCandles"] == 5
+          assert final["session"]["summary"]["remainingCandles"] == 0
+          assert final["session"]["summary"]["candleSnapshotFrozen"] is True
+          assert store.list_replay_trades(session_id) == []
+
+          try:
+              engine.step(
+                  {
+                      "sessionId": session_id,
+                      "requestId": "step_ci_after_complete",
+                      "steps": 1,
+                      "expectedCursorTime": end,
+                  }
+              )
+          except ReplayEngineConflictError as exc:
+              assert "COMPLETED" in str(exc)
+          else:
+              raise AssertionError("completed replay session advanced again")
+
+          events = store.list_replay_events(session_id, limit=100)
+          assert [event["sequenceNo"] for event in events] == list(range(len(events)))
+          assert sum(event["eventType"] == "step.completed" for event in events) == 3
+          assert sum(event["eventType"] == "candle.advanced" for event in events) == 5
+
+          reset = reset_session(store, session_id)
+          assert reset is not None
+          assert reset["status"] == "READY"
+          assert reset["cursorTime"] is None
+          reset_events = store.list_replay_events(session_id, limit=100)
+          assert len(reset_events) == 1
+          assert reset_events[0]["eventType"] == "session.reset"
+          with store.connect() as db:
+              with db.cursor() as cur:
+                  cur.execute(
+                      "SELECT COUNT(*) FROM replay_session_candles WHERE session_id=%s",
+                      (session_id,),
+                  )
+                  assert int(cur.fetchone()[0]) == 5
+
+          late_retry = engine.step(first_request)
+          assert late_retry["idempotent"] is True
+          assert late_retry["cursorTime"] == first["cursorTime"]
+          current_after_retry = store.get_replay_session(session_id)
+          assert current_after_retry["status"] == "READY"
+          assert current_after_retry["cursorTime"] is None
+          assert store.list_replay_events(session_id, limit=100) == reset_events
+
+          gap_session_id = f"replay_{uuid4().hex}"
+          create_session(
+              store,
+              {
+                  "session_id": gap_session_id,
+                  "symbol": "ETHUSDT",
+                  "timeframe": timeframe,
+                  "status": "READY",
+                  "start_time": start,
+                  "end_time": start + (2 * interval),
+                  "cursor_time": None,
+                  "initial_balance": "500",
+                  "strategy_mode": "conservative",
+              },
+              {"source": "gap_fixture"},
+          )
+          store.upsert_replay_candles(
+              [
+                  {
+                      "symbol": "ETHUSDT",
+                      "timeframe": timeframe,
+                      "open_time": start,
+                      "open": "50",
+                      "high": "52",
+                      "low": "49",
+                      "close": "51",
+                      "volume": "10",
+                  },
+                  {
+                      "symbol": "ETHUSDT",
+                      "timeframe": timeframe,
+                      "open_time": start + (2 * interval),
+                      "open": "52",
+                      "high": "54",
+                      "low": "51",
+                      "close": "53",
+                      "volume": "12",
+                  },
+              ]
+          )
+          try:
+              engine.step(
+                  {
+                      "sessionId": gap_session_id,
+                      "requestId": "step_gap_0001",
+                      "steps": 3,
+                      "expectedCursorTime": None,
+                  }
+              )
+          except ReplayEngineDataIncompleteError as exc:
+              assert exc.details["expectedCandles"] == 3
+              assert exc.details["snapshottedCandles"] == 2
+          else:
+              raise AssertionError("replay candle gap was accepted")
+          gap_session = store.get_replay_session(gap_session_id)
+          assert gap_session["cursorTime"] is None
+          assert len(store.list_replay_events(gap_session_id)) == 1
+          PY

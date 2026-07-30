@@ -1,0 +1,63 @@
+name: Sidebar UI verification
+
+on:
+  pull_request:
+    paths:
+      - "scripts/apply_sidebar_ui.py"
+      - "scripts/apply_compact_settings.py"
+      - "scripts/apply_button_state_ui.py"
+      - "backend/tests/test_sidebar_ui_patch.py"
+      - "backend/tests/test_compact_settings_patch.py"
+      - "backend/tests/test_button_state_ui_patch.py"
+      - "frontend/index.html"
+      - "render.yaml"
+      - ".github/workflows/sidebar-ui.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-sidebar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        run: python -m pip install pytest
+
+      - name: Run focused tests
+        run: python -m pytest -q backend/tests/test_sidebar_ui_patch.py backend/tests/test_compact_settings_patch.py backend/tests/test_button_state_ui_patch.py
+
+      - name: Apply UI transformations to real frontend
+        run: |
+          python scripts/apply_sidebar_ui.py
+          python scripts/apply_compact_settings.py
+          python scripts/apply_button_state_ui.py
+
+      - name: Validate generated frontend
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          html = Path("frontend/index.html").read_text(encoding="utf-8")
+          assert html.count('data-sidebar-shell="v1"') == 1
+          assert html.count('data-compact-settings="v1"') == 1
+          assert html.count('id="dashboardTab"') == 1
+          assert html.count('id="controlTab"') == 1
+          assert 'id="sidebarMobileToggle"' in html
+          assert 'id="sidebarKillSwitch"' in html
+          assert "Historical Candle Replay" in html
+          assert "compact-settings-grid" in html
+          assert "syncRuntimeButtons" in html
+          assert "button-state-ui-v1" in html
+          assert "autoStartBtn.disabled = Boolean(bot.enabled)" in html
+          assert "autoStopBtn.disabled = !Boolean(bot.enabled)" in html
+          print("Sidebar, compact settings, and runtime button state generated successfully.")
+          PY

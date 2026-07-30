@@ -1,0 +1,213 @@
+name: Replay Session API CI
+
+on:
+  pull_request:
+    paths:
+      - "backend/replay_sessions.py"
+      - "backend/replay_session_repository.py"
+      - "backend/replay_safety.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_sessions.py"
+      - ".github/workflows/replay-session-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "backend/replay_sessions.py"
+      - "backend/replay_session_repository.py"
+      - "backend/replay_safety.py"
+      - "backend/secure_server.py"
+      - "backend/tests/test_replay_sessions.py"
+      - ".github/workflows/replay-session-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  replay-session-api:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: replay
+          POSTGRES_PASSWORD: replay
+          POSTGRES_DB: replay_session_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U replay -d replay_session_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://replay:replay@localhost:5432/replay_session_ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile replay session runtime
+        run: >-
+          python -m compileall -q
+          backend/replay_sessions.py
+          backend/replay_session_repository.py
+          backend/replay_safety.py
+          backend/secure_server.py
+
+      - name: Run replay session regression tests
+        run: python -m pytest backend/tests/test_replay_sessions.py -q
+
+      - name: Verify PostgreSQL session lifecycle
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          from backend.postgres_state_store import PostgresStateStore
+          from backend.replay_collector import HistoricalKlineCollector, INTERVAL_MS
+          from backend.replay_sessions import (
+              ReplaySessionConflictError,
+              ReplaySessionService,
+          )
+
+
+          class NoNetworkTransport:
+              def get_kline(self, params):
+                  raise AssertionError("Complete cached session start must not call Bybit")
+
+
+          store = PostgresStateStore()
+          status = store.status()
+          assert status["ok"] is True, status
+          assert status["migrationVersion"] >= 2, status
+
+          interval = INTERVAL_MS["5"]
+          start = 1_800_000_000_000
+          end = start + (2 * interval)
+          now_ms = end + (2 * interval)
+          candles = []
+          for index in range(3):
+              close = 100 + index
+              candles.append(
+                  {
+                      "symbol": "BTCUSDT",
+                      "timeframe": "5",
+                      "open_time": start + (index * interval),
+                      "open": str(close),
+                      "high": str(close + 2),
+                      "low": str(close - 1),
+                      "close": str(close + 1),
+                      "volume": "25",
+                      "turnover": "2510",
+                  }
+              )
+          assert store.upsert_replay_candles(candles) == 3
+
+          collector = HistoricalKlineCollector(
+              store,
+              transport=NoNetworkTransport(),
+              min_request_interval_seconds=0,
+              now_ms=lambda: now_ms,
+          )
+          service = ReplaySessionService(
+              store,
+              collector,
+              now_seconds=lambda: 1_800_000_000,
+              token_factory=lambda size: "b" * (size * 2),
+          )
+          payload = {
+              "sessionId": "replay_session_ci_0001",
+              "symbol": "BTCUSDT",
+              "timeframe": "5",
+              "startTime": start,
+              "endTime": end,
+              "initialBalance": "1000",
+              "strategyMode": "balanced",
+              "autoSync": False,
+              "config": {"feeBps": 5, "slippageBps": 2},
+          }
+
+          created = service.start(payload)
+          assert created["created"] is True, created
+          assert created["session"]["status"] == "READY"
+          assert created["session"]["config"]["executionMode"] == "simulated_only"
+          assert created["data"]["syncPerformed"] is False
+
+          repeated = service.start(payload)
+          assert repeated["created"] is False, repeated
+          events = store.list_replay_events("replay_session_ci_0001")
+          assert len(events) == 1, events
+          assert events[0]["eventType"] == "session.created"
+
+          listed = service.list(limit=10, status="ready")
+          assert listed["count"] == 1, listed
+          assert listed["sessions"][0]["sessionId"] == "replay_session_ci_0001"
+
+          detailed = service.get("replay_session_ci_0001")
+          assert detailed["data"]["range"]["complete"] is True, detailed
+          assert detailed["stepEngineImplemented"] is False
+
+          store.upsert_replay_trade(
+              {
+                  "tradeId": "trade_session_ci_0001",
+                  "sessionId": "replay_session_ci_0001",
+                  "symbol": "BTCUSDT",
+                  "side": "Buy",
+                  "status": "CLOSED",
+                  "entryTime": start,
+                  "exitTime": start + interval,
+                  "entryPrice": "100",
+                  "exitPrice": "102",
+                  "quantity": "1",
+                  "realizedPnl": "2",
+                  "fees": "0.10",
+              }
+          )
+          assert store.update_replay_session_state(
+              "replay_session_ci_0001",
+              status="RUNNING",
+              cursor_time=start + interval,
+              balance="1001.90",
+              equity="1001.90",
+              summary={"trades": 1},
+          ) is True
+
+          try:
+              service.reset("replay_session_ci_0001")
+          except ReplaySessionConflictError:
+              pass
+          else:
+              raise AssertionError("Running replay session reset must be blocked")
+
+          assert store.update_replay_session_state(
+              "replay_session_ci_0001",
+              status="PAUSED",
+              cursor_time=start + interval,
+              balance="1001.90",
+              equity="1001.90",
+              summary=None,
+          ) is True
+          reset = service.reset("replay_session_ci_0001")
+          assert reset["session"]["status"] == "READY", reset
+          assert reset["session"]["cursorTime"] is None
+          assert reset["session"]["balance"] == reset["session"]["initialBalance"]
+          assert reset["session"]["summary"] == {}
+          assert store.list_replay_trades("replay_session_ci_0001") == []
+          reset_events = store.list_replay_events("replay_session_ci_0001")
+          assert len(reset_events) == 1, reset_events
+          assert reset_events[0]["eventType"] == "session.reset"
+          PY
