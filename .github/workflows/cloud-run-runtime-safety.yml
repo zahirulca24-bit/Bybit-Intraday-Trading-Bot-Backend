@@ -1,0 +1,54 @@
+name: Cloud Run Runtime Safety
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/runtime_instance_guard.py"
+      - "backend/runtime_lifecycle.py"
+      - "backend/cloud_run_server.py"
+      - "Dockerfile.cloudrun"
+      - "tests/test_cloud_run_runtime_safety.py"
+      - ".github/workflows/cloud-run-runtime-safety.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pytest
+
+      - name: Compile and import Cloud Run runtime
+        run: |
+          python -m py_compile \
+            backend/runtime_instance_guard.py \
+            backend/runtime_lifecycle.py \
+            backend/cloud_run_server.py
+          python -c "import backend.cloud_run_server"
+
+      - name: Run focused safety tests
+        run: python -m pytest -q tests/test_cloud_run_runtime_safety.py
+
+      - name: Verify container contract
+        run: |
+          grep -F 'CMD ["python", "-m", "backend.cloud_run_server"]' Dockerfile.cloudrun
+          grep -F 'PYTHONPATH=/app:/app/backend' Dockerfile.cloudrun
+          grep -F 'EXPOSE 8080' Dockerfile.cloudrun
+          grep -F 'pg_try_advisory_lock' backend/runtime_instance_guard.py
+          grep -F 'signal.SIGTERM' backend/runtime_lifecycle.py
+
+      - name: Build Cloud Run image
+        run: docker build -f Dockerfile.cloudrun -t bybit-backend-cloudrun:test .

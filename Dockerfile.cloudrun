@@ -1,0 +1,25 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app:/app/backend \
+    PORT=8080 \
+    HOST=0.0.0.0
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+RUN python -m py_compile \
+    backend/runtime_instance_guard.py \
+    backend/runtime_lifecycle.py \
+    backend/cloud_run_server.py \
+    && python -c "import backend.cloud_run_server"
+
+EXPOSE 8080
+
+CMD ["python", "-m", "backend.cloud_run_server"]
