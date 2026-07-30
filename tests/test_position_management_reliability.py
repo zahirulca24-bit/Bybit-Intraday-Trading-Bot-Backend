@@ -181,6 +181,8 @@ def test_unverified_breakeven_is_failure_and_immediate_retry_is_suppressed():
     assert core.engine.journal.entries[0]["event"] == "breakeven_stop_failed"
     assert core.engine.status["tradeManagement"] == "error"
     assert core.stop_posts == 1
+    assert second["ok"] is False
+    assert second["failures"] == 1
     assert second["actions"][0]["status"] == "skipped"
 
 

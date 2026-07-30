@@ -25,7 +25,8 @@ class FakeCore:
 
     def fetch_candles(self, symbol, interval, limit=80):
         assert interval == "60"
-        bullish = int(symbol.replace("S", "").replace("USDT", "")) % 2 == 0
+        sequence = int(symbol.removeprefix("S").removesuffix("USDT"))
+        bullish = sequence % 2 == 0
         closes = [100 + index * 0.5 for index in range(80)]
         if not bullish:
             closes = list(reversed(closes))
@@ -58,6 +59,7 @@ def reset_state():
             "lastBatchAt": 0,
             "lastFullCycleAt": 0,
             "lastError": None,
+            "lastBatch": {},
         }
     )
 
@@ -83,7 +85,10 @@ def test_worker_rotates_batches_and_keeps_maximum_30(monkeypatch):
 
     assert first["lastBatch"]["requested"] == 100
     assert first["currentIndex"] == 100
+    assert second["lastBatch"]["requested"] == 100
     assert second["currentIndex"] == 200
+    assert third["lastBatch"]["requested"] == 20
+    assert third["lastBatch"]["wrapped"] is True
     assert third["currentIndex"] == 0
     assert third["cycleNumber"] == 1
     assert len(third["activeSymbols"]) == 30

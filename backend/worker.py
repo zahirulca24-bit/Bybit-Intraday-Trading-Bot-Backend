@@ -146,7 +146,7 @@ def _rank_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def run_batch(core: Any, now: int | None = None) -> dict[str, Any]:
-    """Scan the next round-robin batch and update the rolling best-30 pool."""
+    """Scan the next non-overlapping batch and update the rolling best-30 pool."""
     timestamp = int(now or time.time())
     cfg = settings()
     if not _LOCK.acquire(blocking=False):
@@ -166,8 +166,10 @@ def run_batch(core: Any, now: int | None = None) -> dict[str, Any]:
 
         total = len(symbols)
         start = int(_STATE["currentIndex"]) % total
-        batch_size = min(int(cfg["batchSize"]), total)
-        indexes = [(start + offset) % total for offset in range(batch_size)]
+        configured_batch_size = min(int(cfg["batchSize"]), total)
+        remaining_in_cycle = total - start
+        batch_size = min(configured_batch_size, remaining_in_cycle)
+        indexes = list(range(start, start + batch_size))
         batch = [symbols[index] for index in indexes]
         wrapped = start + batch_size >= total
 
@@ -203,7 +205,7 @@ def run_batch(core: Any, now: int | None = None) -> dict[str, Any]:
         ranked = _rank_rows(list(candidates.values()))
         selected = ranked[: int(cfg["activePoolSize"])]
 
-        next_index = (start + batch_size) % total
+        next_index = 0 if wrapped else start + batch_size
         cycle_number = int(_STATE["cycleNumber"]) + (1 if wrapped else 0)
         scanned_in_cycle = 0 if wrapped else min(total, int(_STATE["scannedInCycle"]) + batch_size)
         _STATE.update({
