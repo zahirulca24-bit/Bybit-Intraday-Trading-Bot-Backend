@@ -14,6 +14,7 @@ from typing import Any
 
 _LOCK = threading.RLock()
 _CONNECTION: Any | None = None
+_CORE: Any | None = None
 _DEFAULT_LOCK_ID = 742_026_073_001
 _STATE: dict[str, Any] = {
     "status": "not_initialized",
@@ -59,7 +60,8 @@ def _set_core_state(core: Any, *, leader: bool, reason: str) -> None:
 
 def acquire(core: Any) -> dict[str, Any]:
     """Acquire and retain a PostgreSQL session advisory lock."""
-    global _CONNECTION
+    global _CONNECTION, _CORE
+    _CORE = core
     with _LOCK:
         if _CONNECTION is not None and _STATE.get("leader"):
             return snapshot_unlocked(check_connection=True)
@@ -148,13 +150,16 @@ def snapshot_unlocked(*, check_connection: bool = False) -> dict[str, Any]:
             except Exception:
                 pass
             _CONNECTION = None
+            reason = "Runtime leader connection was lost; automatic execution is blocked."
             _STATE.update({
                 "status": "lost",
                 "leader": False,
                 "lastCheckedAt": int(time.time()),
                 "lastError": str(exc),
-                "reason": "Runtime leader connection was lost; automatic execution is blocked.",
+                "reason": reason,
             })
+            if _CORE is not None:
+                _set_core_state(_CORE, leader=False, reason=reason)
     return dict(_STATE)
 
 
@@ -169,7 +174,7 @@ def is_leader() -> bool:
 
 def release(core: Any | None = None, reason: str = "Runtime shutdown completed.") -> dict[str, Any]:
     """Release the advisory lock and close its dedicated database session."""
-    global _CONNECTION
+    global _CONNECTION, _CORE
     with _LOCK:
         connection = _CONNECTION
         lock_id = int(_STATE.get("lockId") or _DEFAULT_LOCK_ID)
@@ -192,12 +197,16 @@ def release(core: Any | None = None, reason: str = "Runtime shutdown completed."
             "lastCheckedAt": int(time.time()),
             "reason": str(reason),
         })
-        if core is not None:
-            _set_core_state(core, leader=False, reason=str(reason))
+        target_core = core if core is not None else _CORE
+        if target_core is not None:
+            _set_core_state(target_core, leader=False, reason=str(reason))
+        _CORE = None
         return snapshot_unlocked()
 
 
 def install(core: Any) -> dict[str, Any]:
+    global _CORE
+    _CORE = core
     core.runtime_leadership_status = snapshot
     core.runtime_execution_leader = is_leader
     return acquire(core)
