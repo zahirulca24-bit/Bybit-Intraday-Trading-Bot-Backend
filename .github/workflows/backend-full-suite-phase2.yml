@@ -1,8 +1,9 @@
-name: Backend Full Suite Phase 2
+name: Backend Full Suite
 
 on:
   push:
     branches:
+      - main
       - fix/backend-test-stabilization-phase2
   pull_request:
     branches: [main]
@@ -55,7 +56,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pytest
+          python -m pip install -r requirements.txt pytest==9.1.1
 
       - name: Compile backend
         run: python -m compileall -q backend tests
