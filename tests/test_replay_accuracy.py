@@ -56,6 +56,10 @@ class FakeCore:
         return FakeCore.vote("VWAP Bounce", "WAIT", "fixture")
 
     @staticmethod
+    def liquidity_sweep_engine(*args):
+        return FakeCore.vote("Liquidity Sweep", "WAIT", "fixture")
+
+    @staticmethod
     def route_votes(votes, mode):
         return {"decision": "Buy", "confidence": 1, "requiredVotes": 1, "mode": mode, "reason": "fixture"}
 
