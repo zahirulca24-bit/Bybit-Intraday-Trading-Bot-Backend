@@ -10,12 +10,25 @@ This wrapper preserves the existing secure runtime while adding:
 from __future__ import annotations
 
 import os
+import sys
 from http.server import ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
-try:
+# The legacy backend contains a few absolute imports such as
+# ``from engines...`` even when loaded as the ``backend`` package.  Make both
+# the repository root and backend directory explicit before importing the
+# canonical patch chain.  This keeps CI, Cloud Run, and direct execution
+# deterministic without masking nested ImportError exceptions.
+_BACKEND_DIR = Path(__file__).resolve().parent
+_REPOSITORY_ROOT = _BACKEND_DIR.parent
+for _path in (str(_REPOSITORY_ROOT), str(_BACKEND_DIR)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+if __package__:
     from . import runtime_instance_guard, runtime_lifecycle, secure_server
-except ImportError:
+else:
     import runtime_instance_guard
     import runtime_lifecycle
     import secure_server
