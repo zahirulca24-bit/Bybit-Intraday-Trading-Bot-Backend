@@ -85,7 +85,10 @@ def test_worker_rotates_batches_and_keeps_maximum_30(monkeypatch):
 
     assert first["lastBatch"]["requested"] == 100
     assert first["currentIndex"] == 100
+    assert second["lastBatch"]["requested"] == 100
     assert second["currentIndex"] == 200
+    assert third["lastBatch"]["requested"] == 20
+    assert third["lastBatch"]["wrapped"] is True
     assert third["currentIndex"] == 0
     assert third["cycleNumber"] == 1
     assert len(third["activeSymbols"]) == 30
