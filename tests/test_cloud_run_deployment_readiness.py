@@ -58,8 +58,17 @@ def test_environment_rejects_live_endpoint_wildcard_and_auto_resume():
 
 def test_runtime_readiness_accepts_leader_and_standby_api_instances(monkeypatch):
     install_environment(monkeypatch)
-    core = SimpleNamespace(durable_state_status=lambda: {"ok": True, "degraded": False})
-    workers = SimpleNamespace(snapshot=lambda: {"status": "running"})
+    core = SimpleNamespace(
+        durable_state_status=lambda: {
+            "ok": True,
+            "backend": "postgresql",
+            "degraded": False,
+            "restartSafe": True,
+            "persistentPathConfigured": True,
+            "migrationVersion": 4,
+        }
+    )
+    workers = SimpleNamespace(snapshot=lambda: {"status": "running", "threadAlive": True})
 
     leader = deployment_readiness.runtime_readiness(
         core,
@@ -74,21 +83,50 @@ def test_runtime_readiness_accepts_leader_and_standby_api_instances(monkeypatch)
 
     assert leader["ok"] is True
     assert leader["executionReady"] is True
+    assert leader["durableState"]["migrationVersion"] == 4
     assert standby["ok"] is True
     assert standby["executionReady"] is False
 
 
-def test_runtime_readiness_fails_closed_on_lost_leadership(monkeypatch):
+def test_runtime_readiness_fails_closed_without_leaking_internal_errors(monkeypatch):
     install_environment(monkeypatch)
+    database_error = "password=super-secret host=private-db.internal"
+    leadership_error = "leader connection failed at private-db.internal"
+    worker_error = "private worker traceback"
+
     result = deployment_readiness.runtime_readiness(
-        SimpleNamespace(durable_state_status=lambda: {"ok": True, "degraded": False}),
-        SimpleNamespace(snapshot=lambda: {"status": "lost", "leader": False, "reason": "connection lost"}),
-        SimpleNamespace(snapshot=lambda: {"status": "standby"}),
+        SimpleNamespace(
+            durable_state_status=lambda: {
+                "ok": False,
+                "degraded": True,
+                "error": database_error,
+            }
+        ),
+        SimpleNamespace(
+            snapshot=lambda: {
+                "status": "lost",
+                "leader": False,
+                "reason": leadership_error,
+            }
+        ),
+        SimpleNamespace(
+            snapshot=lambda: {
+                "status": "error",
+                "lastError": worker_error,
+            }
+        ),
     )
 
     assert result["ok"] is False
     assert result["status"] == "not_ready"
-    assert "connection lost" in result["reasons"]
+    assert result["reasons"] == [
+        "Persistent PostgreSQL state is not ready.",
+        "Runtime leadership state is not ready.",
+    ]
+    serialized = repr(result)
+    assert database_error not in serialized
+    assert leadership_error not in serialized
+    assert worker_error not in serialized
 
 
 def test_cloud_run_entrypoint_exposes_probe_contract():
