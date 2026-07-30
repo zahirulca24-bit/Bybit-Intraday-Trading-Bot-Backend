@@ -1,6 +1,8 @@
 """Cloud Run-safe entrypoint for the canonical Bybit Demo backend.
 
 This wrapper preserves the existing secure runtime while adding:
+- validated fail-fast Cloud Run configuration;
+- public liveness and readiness probes with no secret values;
 - PostgreSQL advisory-lock single-leader ownership for automatic workers;
 - fail-closed checks on order-capable mutation routes;
 - periodic leader-connection verification inside the worker scheduler;
@@ -27,8 +29,14 @@ for _path in (str(_REPOSITORY_ROOT), str(_BACKEND_DIR)):
         sys.path.insert(0, _path)
 
 if __package__:
-    from . import runtime_instance_guard, runtime_lifecycle, secure_server
+    from . import (
+        deployment_readiness,
+        runtime_instance_guard,
+        runtime_lifecycle,
+        secure_server,
+    )
 else:
+    import deployment_readiness
     import runtime_instance_guard
     import runtime_lifecycle
     import secure_server
@@ -63,6 +71,7 @@ def _disable_execution(reason: str) -> None:
 
 def _install_orchestrator_guard() -> None:
     """Acquire leadership only after durable PostgreSQL state is installed."""
+
     def guarded_start(
         runtime_core: Any,
         symbol_worker: Any,
@@ -145,10 +154,21 @@ def install_cloud_run_safety() -> None:
 
 
 class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
-    """Canonical handler with explicit runtime leadership diagnostics."""
+    """Canonical handler with health and runtime leadership diagnostics."""
 
     def do_GET(self):
         path = self.path.split("?", 1)[0]
+        if path in {"/healthz", "/api/health"}:
+            core.json_response(self, 200, deployment_readiness.liveness_payload())
+            return
+        if path == "/readyz":
+            readiness = deployment_readiness.runtime_readiness(
+                core,
+                runtime_instance_guard,
+                secure_server.runtime_orchestrator,
+            )
+            core.json_response(self, 200 if readiness.get("ok") else 503, readiness)
+            return
         if path == "/api/runtime/leadership":
             if secure_server.reject_disallowed_origin(self):
                 return
@@ -183,6 +203,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
 
 
 def run() -> None:
+    startup_environment = deployment_readiness.require_environment()
     install_cloud_run_safety()
     secure_server.install_secure_runtime()
     _install_start_gate()
@@ -200,6 +221,7 @@ def run() -> None:
     lifecycle.install_signal_handlers()
 
     print(f"Cloud Run-safe Bybit Demo backend listening on http://{host}:{port}", flush=True)
+    print(f"Startup environment: {startup_environment}", flush=True)
     print(f"Runtime leadership: {runtime_instance_guard.snapshot()}", flush=True)
     print(f"Durable state: {core.durable_state_status()}", flush=True)
     print(f"Worker runtime: {secure_server.runtime_orchestrator.snapshot()}", flush=True)
