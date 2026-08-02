@@ -18,12 +18,12 @@ const payload = {
   orderSubmitted: false,
   marginMode: 'ISOLATED',
   leverage: 5,
-  qty: '0.010',
+  qty: '0.100',
   entryReference: 100,
   technicalStopLoss: 99,
   takeProfitReference: 102,
-  requiredInitialMarginUsdt: 0.2,
-  projectedTotalInitialMarginUsdt: 100.2,
+  requiredInitialMarginUsdt: 2,
+  projectedTotalInitialMarginUsdt: 102,
   nodeExecutionRequirements: {
     marginMode: 'ISOLATED',
     leverage: 5,
@@ -76,7 +76,7 @@ function repositoryMock() {
   };
 }
 
-function bybitMock(resolution = { state: 'FILLED', executions: [{ execId: 'e1', execQty: '0.010', execPrice: '100' }], cumulativeQty: 0.01 }) {
+function bybitMock(resolution = { state: 'FILLED', executions: [{ execId: 'e1', execQty: '0.100', execPrice: '100' }], cumulativeQty: 0.1 }) {
   let created = 0;
   let marginChanges = 0;
   return {
@@ -94,7 +94,7 @@ function bybitMock(resolution = { state: 'FILLED', executions: [{ execId: 'e1', 
     setLeverage: async () => ({ retCode: 0 }),
     createOrder: async () => { created += 1; return { retCode: 0, result: { orderId: 'order-1' } }; },
     waitForResolution: async () => resolution,
-    ensureProtection: async () => ({ symbol: 'BTCUSDT', size: '0.010', stopLoss: '99', takeProfit: '102' }),
+    ensureProtection: async () => ({ symbol: 'BTCUSDT', size: '0.100', stopLoss: '99', takeProfit: '102' }),
   };
 }
 
@@ -126,7 +126,7 @@ test('contract and final live truth are revalidated', () => {
   assert.equal(result.grossRr, 2);
   assert.throws(() => validateContract({ ...payload, leverage: 10 }, 'cand-1'), /Isolated 5x/);
   assert.throws(() => revalidateLive(payload, liveTruth({ ticker: { result: { list: [{ markPrice: '101' }] } } }), config, now), /drift/);
-  assert.throws(() => revalidateLive({ ...payload, qty: '0.0105' }, liveTruth(), config, now), /qtyStep/);
+  assert.throws(() => revalidateLive({ ...payload, qty: '0.1005' }, liveTruth(), config, now), /qtyStep/);
   assert.throws(() => revalidateLive({ ...payload, sizingDecisionAt: now - 5000 }, liveTruth(), config, now), /stale/);
 });
 
