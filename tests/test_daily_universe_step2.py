@@ -95,7 +95,10 @@ class DailyUniverseStep2Tests(unittest.TestCase):
             classify_trend = staticmethod(self.classifier)
 
         core = FakeCore(rows, now)
-        with patch.dict(os.environ, {"DAILY_UNIVERSE_SIZE": "100"}, clear=False):
+        with (
+            patch.dict(os.environ, {"DAILY_UNIVERSE_SIZE": "100"}, clear=False),
+            patch("backend.daily_universe.time.time", return_value=now),
+        ):
             daily_universe.install(core, Worker)
             result = daily_universe.build(core, now=now)
             selected, selected_tickers = Worker._fetch_active_usdt_symbols(core)
@@ -139,9 +142,10 @@ class DailyUniverseStep2Tests(unittest.TestCase):
             classify_trend = staticmethod(self.classifier)
 
         core = FakeCore(rows, now)
-        daily_universe.install(core, Worker)
-        result = daily_universe.build(core, now=now)
-        fallback_symbols, fallback_tickers = Worker._fetch_active_usdt_symbols(core)
+        with patch("backend.daily_universe.time.time", return_value=now):
+            daily_universe.install(core, Worker)
+            result = daily_universe.build(core, now=now)
+            fallback_symbols, fallback_tickers = Worker._fetch_active_usdt_symbols(core)
 
         self.assertEqual(result["status"], "empty")
         self.assertEqual(result["metrics"]["rejected"]["timeframeConflict"], 10)
