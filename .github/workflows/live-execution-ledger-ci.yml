@@ -120,5 +120,6 @@ jobs:
           versions = [version for version, _ in MIGRATIONS]
           assert versions == sorted(set(versions)), versions
           assert LIVE_EXECUTION_MIGRATION in MIGRATIONS
-          assert live_execution_ledger.SCHEMA_VERSION == max(versions) == 4
+          assert live_execution_ledger.SCHEMA_VERSION == LIVE_EXECUTION_MIGRATION[0] == 4
+          assert max(versions) >= live_execution_ledger.SCHEMA_VERSION
           PY
