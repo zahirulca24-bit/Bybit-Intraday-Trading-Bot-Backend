@@ -44,7 +44,7 @@ jobs:
         run: |
           node - <<'JS'
           import fs from 'node:fs';
-          const files = ['src/config.js','src/bybitClient.js','src/executor.js','src/index.js'];
+          const files = ['src/config.js','src/bybitClient.js','src/executor.js','src/httpServer.js','src/index.js'];
           const source = files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
           if (source.includes('https://api.bybit.com')) throw new Error('Production Bybit endpoint is forbidden');
           if (!source.includes('https://api-demo.bybit.com')) throw new Error('Demo endpoint lock missing');
