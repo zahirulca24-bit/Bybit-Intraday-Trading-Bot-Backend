@@ -1,4 +1,4 @@
-"""Automatic scheduler for symbol selection, setup verification, and execution handoff."""
+"""Automatic scheduler for staged symbol selection and entry confirmation."""
 
 from __future__ import annotations
 
@@ -17,13 +17,17 @@ _STATE: dict[str, Any] = {
     "lastLoopAt": 0,
     "lastSymbolRunAt": 0,
     "lastSetupRunAt": 0,
+    "lastEntryRunAt": 0,
     "lastExecutionRunAt": 0,
     "nextSymbolRunAt": 0,
     "nextSetupRunAt": 0,
     "nextExecutionRunAt": 0,
     "symbolRuns": 0,
     "setupRuns": 0,
+    "entryRuns": 0,
     "executionRuns": 0,
+    "legacySetupWorkerDisabled": True,
+    "legacyPythonExecutionDisabled": True,
     "lastError": None,
 }
 
@@ -36,21 +40,44 @@ def _integer(name: str, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-def settings() -> dict[str, int]:
+def settings() -> dict[str, Any]:
     return {
-        "symbolIntervalSeconds": _integer("SYMBOL_WORKER_INTERVAL_SECONDS", 300, 30, 3600),
-        "setupIntervalSeconds": _integer("SETUP_WORKER_INTERVAL_SECONDS", 300, 30, 3600),
-        "executionIntervalSeconds": _integer("EXECUTION_HANDOFF_INTERVAL_SECONDS", 30, 5, 300),
-        "idleSleepSeconds": _integer("WORKER_ORCHESTRATOR_IDLE_SECONDS", 1, 1, 10),
+        "symbolIntervalSeconds": _integer(
+            "SYMBOL_WORKER_INTERVAL_SECONDS", 300, 30, 3600
+        ),
+        "setupIntervalSeconds": _integer(
+            "SETUP_WORKER_INTERVAL_SECONDS", 300, 30, 3600
+        ),
+        "legacyExecutionIntervalSeconds": _integer(
+            "EXECUTION_HANDOFF_INTERVAL_SECONDS", 30, 5, 300
+        ),
+        "idleSleepSeconds": _integer(
+            "WORKER_ORCHESTRATOR_IDLE_SECONDS", 1, 1, 10
+        ),
+        "legacySetupWorkerEnabled": False,
+        "legacyPythonExecutionEnabled": False,
+        "entryConfirmationCadence": "NEW_CLOSED_5M_ON_SETUP_CYCLE",
     }
 
 
-def _run_fifteen_minute_strategy_classifier(core: Any, now: int) -> dict[str, Any]:
+def _run_fifteen_minute_strategy_classifier(
+    core: Any, now: int
+) -> dict[str, Any]:
     try:
         from . import fifteen_minute_strategy_classifier
     except ImportError:
         import fifteen_minute_strategy_classifier
     return fifteen_minute_strategy_classifier.ensure_current(core, now=now)
+
+
+def _run_five_minute_entry_confirmation(
+    core: Any, now: int
+) -> dict[str, Any]:
+    try:
+        from . import five_minute_entry_confirmation
+    except ImportError:
+        import five_minute_entry_confirmation
+    return five_minute_entry_confirmation.ensure_current(core, now=now)
 
 
 def run_due_once(
@@ -60,38 +87,42 @@ def run_due_once(
     execution_handoff: Any | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Run due components once; guarded execution remains dependent on BOT_STATE.enabled."""
+    """Run staged scanner components; legacy Python entry execution stays off."""
     timestamp = int(now or time.time())
     cfg = settings()
     with _LOCK:
         symbol_due = int(_STATE.get("nextSymbolRunAt") or 0) <= timestamp
         setup_due = int(_STATE.get("nextSetupRunAt") or 0) <= timestamp
-        execution_due = execution_handoff is not None and int(_STATE.get("nextExecutionRunAt") or 0) <= timestamp
 
     try:
         if symbol_due:
             symbol_worker.run_batch(core, now=timestamp)
             with _LOCK:
                 _STATE["lastSymbolRunAt"] = timestamp
-                _STATE["nextSymbolRunAt"] = timestamp + int(cfg["symbolIntervalSeconds"])
+                _STATE["nextSymbolRunAt"] = (
+                    timestamp + int(cfg["symbolIntervalSeconds"])
+                )
                 _STATE["symbolRuns"] = int(_STATE.get("symbolRuns") or 0) + 1
 
         if setup_due:
             _run_fifteen_minute_strategy_classifier(core, timestamp)
-            setup_worker.run_batch(core, symbol_worker, now=timestamp)
+            _run_five_minute_entry_confirmation(core, timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
-                _STATE["nextSetupRunAt"] = timestamp + int(cfg["setupIntervalSeconds"])
+                _STATE["lastEntryRunAt"] = timestamp
+                _STATE["nextSetupRunAt"] = (
+                    timestamp + int(cfg["setupIntervalSeconds"])
+                )
                 _STATE["setupRuns"] = int(_STATE.get("setupRuns") or 0) + 1
+                _STATE["entryRuns"] = int(_STATE.get("entryRuns") or 0) + 1
 
-        if execution_due:
-            execution_handoff.run_once(core, setup_worker, now=timestamp)
-            with _LOCK:
-                _STATE["lastExecutionRunAt"] = timestamp
-                _STATE["nextExecutionRunAt"] = timestamp + int(cfg["executionIntervalSeconds"])
-                _STATE["executionRuns"] = int(_STATE.get("executionRuns") or 0) + 1
-
+        # Deliberate Step-6 cutover: do not call setup_worker.run_batch() and do
+        # not call execution_handoff.run_once(). The modules remain available
+        # for audit/rollback, but new entries wait for Node.js execution.
         with _LOCK:
+            _STATE["legacySetupWorkerDisabled"] = True
+            _STATE["legacyPythonExecutionDisabled"] = True
+            _STATE["nextExecutionRunAt"] = 0
             _STATE["lastLoopAt"] = timestamp
             _STATE["lastError"] = None
         return snapshot()
@@ -103,7 +134,12 @@ def run_due_once(
         return snapshot()
 
 
-def _loop(core: Any, symbol_worker: Any, setup_worker: Any, execution_handoff: Any | None) -> None:
+def _loop(
+    core: Any,
+    symbol_worker: Any,
+    setup_worker: Any,
+    execution_handoff: Any | None,
+) -> None:
     with _LOCK:
         _STATE["status"] = "running"
     while not _STOP_EVENT.is_set():
@@ -115,7 +151,6 @@ def _loop(core: Any, symbol_worker: Any, setup_worker: Any, execution_handoff: A
 
 
 def _install_daily_universe(core: Any, symbol_worker: Any) -> None:
-    """Install the persistent daily Top-100 source after durable state exists."""
     try:
         from . import daily_universe
     except ImportError:
@@ -134,8 +169,9 @@ def _daily_universe_status() -> dict[str, Any]:
     return daily_universe.snapshot()
 
 
-def _install_four_hour_directional_pool(core: Any, symbol_worker: Any) -> None:
-    """Layer the closed-4H Top-50 source over the installed daily Top-100 source."""
+def _install_four_hour_directional_pool(
+    core: Any, symbol_worker: Any
+) -> None:
     try:
         from . import four_hour_directional_pool
     except ImportError:
@@ -155,7 +191,6 @@ def _four_hour_directional_pool_status() -> dict[str, Any]:
 
 
 def _install_hourly_watchlist(core: Any, symbol_worker: Any) -> None:
-    """Expose the persistent closed-1H Top-20 list through the existing worker API."""
     try:
         from . import hourly_watchlist
     except ImportError:
@@ -174,8 +209,9 @@ def _hourly_watchlist_status() -> dict[str, Any]:
     return hourly_watchlist.snapshot()
 
 
-def _install_fifteen_minute_strategy_classifier(core: Any, setup_worker: Any) -> None:
-    """Install additive closed-15M classification without replacing entry handoff."""
+def _install_fifteen_minute_strategy_classifier(
+    core: Any, setup_worker: Any
+) -> None:
     try:
         from . import fifteen_minute_strategy_classifier
     except ImportError:
@@ -194,8 +230,28 @@ def _fifteen_minute_strategy_classifier_status() -> dict[str, Any]:
     return fifteen_minute_strategy_classifier.snapshot()
 
 
+def _install_five_minute_entry_confirmation(
+    core: Any, setup_worker: Any
+) -> None:
+    try:
+        from . import five_minute_entry_confirmation
+    except ImportError:
+        import five_minute_entry_confirmation
+    five_minute_entry_confirmation.install(core, setup_worker)
+
+
+def _five_minute_entry_confirmation_status() -> dict[str, Any]:
+    try:
+        from . import five_minute_entry_confirmation
+    except ImportError:
+        try:
+            import five_minute_entry_confirmation
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return five_minute_entry_confirmation.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
-    """Install after durable state exists and before automatic workers start."""
     try:
         from . import issue1_risk_exit_policy
         from . import position_synced_server as verified
@@ -206,7 +262,6 @@ def _install_issue1_policy(core: Any) -> None:
 
 
 def _install_strategy_step1(core: Any) -> None:
-    """Install session-aware ORB and 1H/15M/5M confluence before workers start."""
     try:
         from . import strategy_step1_upgrade
     except ImportError:
@@ -215,7 +270,6 @@ def _install_strategy_step1(core: Any) -> None:
 
 
 def _install_strategy_step2(core: Any, setup_worker: Any) -> None:
-    """Install ATR SL/TP and deterministic grading before workers start."""
     try:
         from . import strategy_step2_upgrade
     except ImportError:
@@ -224,7 +278,6 @@ def _install_strategy_step2(core: Any, setup_worker: Any) -> None:
 
 
 def _install_strategy_step3(core: Any) -> None:
-    """Install market-regime filtering and trade-quality analytics."""
     try:
         from . import analytics_runtime, strategy_step3_upgrade
     except ImportError:
@@ -233,13 +286,32 @@ def _install_strategy_step3(core: Any) -> None:
     strategy_step3_upgrade.install(core, analytics_runtime)
 
 
+def _install_python_execution_cutover(core: Any) -> None:
+    try:
+        from . import python_execution_cutover
+    except ImportError:
+        import python_execution_cutover
+    python_execution_cutover.install(core)
+
+
+def _python_execution_cutover_status(core: Any | None = None) -> dict[str, Any]:
+    try:
+        from . import python_execution_cutover
+    except ImportError:
+        try:
+            import python_execution_cutover
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return python_execution_cutover.status(core)
+
+
 def start(
     core: Any,
     symbol_worker: Any,
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> dict[str, Any]:
-    """Start exactly one daemon scheduler and make all configured stages due."""
+    """Start one scanner scheduler with Python automatic entries disabled."""
     global _THREAD
     _install_daily_universe(core, symbol_worker)
     _install_four_hour_directional_pool(core, symbol_worker)
@@ -249,20 +321,26 @@ def start(
     _install_strategy_step2(core, setup_worker)
     _install_strategy_step3(core)
     _install_fifteen_minute_strategy_classifier(core, setup_worker)
+    _install_five_minute_entry_confirmation(core, setup_worker)
+    _install_python_execution_cutover(core)
     with _LOCK:
         if _THREAD is not None and _THREAD.is_alive():
-            return snapshot_unlocked()
+            return snapshot_unlocked(core)
         now = int(time.time())
         _STOP_EVENT.clear()
-        _STATE.update({
-            "status": "starting",
-            "startedAt": now,
-            "stoppedAt": 0,
-            "nextSymbolRunAt": now,
-            "nextSetupRunAt": now,
-            "nextExecutionRunAt": now,
-            "lastError": None,
-        })
+        _STATE.update(
+            {
+                "status": "starting",
+                "startedAt": now,
+                "stoppedAt": 0,
+                "nextSymbolRunAt": now,
+                "nextSetupRunAt": now,
+                "nextExecutionRunAt": 0,
+                "legacySetupWorkerDisabled": True,
+                "legacyPythonExecutionDisabled": True,
+                "lastError": None,
+            }
+        )
         _THREAD = threading.Thread(
             target=_loop,
             args=(core, symbol_worker, setup_worker, execution_handoff),
@@ -270,7 +348,7 @@ def start(
             daemon=True,
         )
         _THREAD.start()
-        return snapshot_unlocked()
+        return snapshot_unlocked(core)
 
 
 def stop(timeout: float = 5.0) -> dict[str, Any]:
@@ -287,7 +365,7 @@ def stop(timeout: float = 5.0) -> dict[str, Any]:
         return snapshot_unlocked()
 
 
-def snapshot_unlocked() -> dict[str, Any]:
+def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
     return {
         **dict(_STATE),
         "threadAlive": bool(_THREAD is not None and _THREAD.is_alive()),
@@ -295,7 +373,13 @@ def snapshot_unlocked() -> dict[str, Any]:
         "dailyUniverse": _daily_universe_status(),
         "fourHourDirectionalPool": _four_hour_directional_pool_status(),
         "hourlyWatchlist": _hourly_watchlist_status(),
-        "fifteenMinuteStrategyClassification": _fifteen_minute_strategy_classifier_status(),
+        "fifteenMinuteStrategyClassification": (
+            _fifteen_minute_strategy_classifier_status()
+        ),
+        "fiveMinuteEntryConfirmation": (
+            _five_minute_entry_confirmation_status()
+        ),
+        "pythonExecutionCutover": _python_execution_cutover_status(core),
     }
 
 
