@@ -3,6 +3,7 @@ import { loadConfig } from './config.js';
 import { BybitClient } from './bybitClient.js';
 import { ExecutionRepository } from './repository.js';
 import { CommandExecutor } from './executor.js';
+import { TradeManager } from './tradeManager.js';
 import { createHealthServer } from './httpServer.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -26,16 +27,30 @@ const pool = new pg.Pool({
   max: 8,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,
-  application_name: 'bybit-node-execution-step10',
+  application_name: 'bybit-node-execution-step11',
 });
 const repository = new ExecutionRepository(pool);
 const bybit = new BybitClient(config);
 const executor = new CommandExecutor(repository, bybit, config);
+const manager = new TradeManager(repository, bybit, config);
 let stopping = false;
 let workersStarted = false;
 
 function setSlot(slotId, state, candidateKey = null) {
   runtime.slots[slotId] = { state, candidateKey, updatedAt: new Date().toISOString() };
+}
+
+async function processCommand(command) {
+  if (['RESERVED', 'ORDER_PENDING'].includes(command.state)) return executor.execute(command);
+  if (['PARTIALLY_FILLED', 'MANAGING'].includes(command.state)) return manager.cycle(command);
+  if (command.state === 'CLOSING') {
+    const position = await bybit.position(command.payload.symbol);
+    const stillOpen = (position?.result?.list || []).some((row) => Number(row.size || 0) > 0 && String(row.side) === String(command.payload.side));
+    if (stillOpen) return command;
+    await repository.recordOrder(command, 'CLOSING_RECONCILED', { reason: 'No open exchange position remains' });
+    return repository.transition(command, 'CLOSED');
+  }
+  return command;
 }
 
 async function slotLoop(slotId) {
@@ -44,7 +59,7 @@ async function slotLoop(slotId) {
   while (!stopping && runtime.leader) {
     let command = null;
     try {
-      command = await repository.ownedExecutionCommand(ownerId, slotId);
+      command = await repository.ownedActiveCommand(ownerId, slotId);
       if (!command) command = await repository.claim(ownerId, slotId);
       if (!command) {
         setSlot(slotId, 'WAITING');
@@ -52,19 +67,13 @@ async function slotLoop(slotId) {
         continue;
       }
       setSlot(slotId, command.state, command.candidateKey);
-      const result = await executor.execute(command);
+      const result = await processCommand(command);
       setSlot(slotId, result?.state || 'UNKNOWN', command.candidateKey);
+      await sleep(config.pollMs);
     } catch (error) {
       runtime.lastError = error.message;
       setSlot(slotId, command?.state || 'ERROR', command?.candidateKey || null);
-      console.error(JSON.stringify({
-        level: 'error',
-        event: 'slot_error',
-        slotId,
-        candidateKey: command?.candidateKey || null,
-        message: error.message,
-        time: new Date().toISOString(),
-      }));
+      console.error(JSON.stringify({ level: 'error', event: 'slot_error', slotId, candidateKey: command?.candidateKey || null, message: error.message, time: new Date().toISOString() }));
       await sleep(config.pollMs);
     }
   }
@@ -72,7 +81,7 @@ async function slotLoop(slotId) {
 
 async function coordinator() {
   if (!config.enabled) {
-    runtime.lastError = 'NODE_EXECUTION_ENABLED is false; execution remains fail-closed.';
+    runtime.lastError = 'NODE_EXECUTION_ENABLED is false; execution and management remain fail-closed.';
     console.log(JSON.stringify({ level: 'warn', event: 'execution_disabled' }));
     return;
   }
@@ -91,7 +100,7 @@ async function coordinator() {
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      console.log(JSON.stringify({ level: 'info', event: 'execution_leader_ready', ownerId: config.ownerId }));
+      console.log(JSON.stringify({ level: 'info', event: 'execution_management_leader_ready', ownerId: config.ownerId }));
       await Promise.all([1, 2, 3].map(slotLoop));
     } catch (error) {
       runtime.ready = false;
@@ -112,12 +121,7 @@ async function shutdown(signal) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-for (const signal of ['SIGTERM', 'SIGINT']) {
-  process.on(signal, () => {
-    shutdown(signal).finally(() => process.exit(0));
-  });
-}
-
+for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => shutdown(signal).finally(() => process.exit(0)));
 process.on('unhandledRejection', (error) => {
   runtime.ready = false;
   runtime.lastError = error?.message || String(error);
