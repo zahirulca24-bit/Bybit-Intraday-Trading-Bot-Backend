@@ -1,4 +1,4 @@
-"""Automatic scheduler for staged symbol selection and entry confirmation."""
+"""Automatic scheduler for staged symbol selection and entry preparation."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ _STATE: dict[str, Any] = {
     "lastSetupRunAt": 0,
     "lastEntryRunAt": 0,
     "lastRiskRunAt": 0,
+    "lastSizingRunAt": 0,
     "lastExecutionRunAt": 0,
     "nextSymbolRunAt": 0,
     "nextSetupRunAt": 0,
@@ -27,6 +28,7 @@ _STATE: dict[str, Any] = {
     "setupRuns": 0,
     "entryRuns": 0,
     "riskRuns": 0,
+    "sizingRuns": 0,
     "executionRuns": 0,
     "legacySetupWorkerDisabled": True,
     "legacyPythonExecutionDisabled": True,
@@ -60,6 +62,7 @@ def settings() -> dict[str, Any]:
         "legacyPythonExecutionEnabled": False,
         "entryConfirmationCadence": "NEW_CLOSED_5M_ON_SETUP_CYCLE",
         "riskDecisionCadence": "AFTER_CLOSED_5M_ENTRY_CONFIRMATION",
+        "positionSizingCadence": "AFTER_AUTHORITATIVE_RISK_APPROVAL",
     }
 
 
@@ -93,6 +96,16 @@ def _run_authoritative_entry_risk(
     return authoritative_entry_risk.ensure_current(core, now=now)
 
 
+def _run_position_sizing_margin(
+    core: Any, now: int
+) -> dict[str, Any]:
+    try:
+        from . import position_sizing_margin
+    except ImportError:
+        import position_sizing_margin
+    return position_sizing_margin.ensure_current(core, now=now)
+
+
 def run_due_once(
     core: Any,
     symbol_worker: Any,
@@ -121,16 +134,19 @@ def run_due_once(
             _run_fifteen_minute_strategy_classifier(core, timestamp)
             _run_five_minute_entry_confirmation(core, timestamp)
             _run_authoritative_entry_risk(core, timestamp)
+            _run_position_sizing_margin(core, timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
                 _STATE["lastEntryRunAt"] = timestamp
                 _STATE["lastRiskRunAt"] = timestamp
+                _STATE["lastSizingRunAt"] = timestamp
                 _STATE["nextSetupRunAt"] = (
                     timestamp + int(cfg["setupIntervalSeconds"])
                 )
                 _STATE["setupRuns"] = int(_STATE.get("setupRuns") or 0) + 1
                 _STATE["entryRuns"] = int(_STATE.get("entryRuns") or 0) + 1
                 _STATE["riskRuns"] = int(_STATE.get("riskRuns") or 0) + 1
+                _STATE["sizingRuns"] = int(_STATE.get("sizingRuns") or 0) + 1
 
         # Deliberate cutover: do not call setup_worker.run_batch() and do not
         # call execution_handoff.run_once(). The modules remain available for
@@ -286,6 +302,25 @@ def _authoritative_entry_risk_status() -> dict[str, Any]:
     return authoritative_entry_risk.snapshot()
 
 
+def _install_position_sizing_margin(core: Any, setup_worker: Any) -> None:
+    try:
+        from . import position_sizing_margin
+    except ImportError:
+        import position_sizing_margin
+    position_sizing_margin.install(core, setup_worker)
+
+
+def _position_sizing_margin_status() -> dict[str, Any]:
+    try:
+        from . import position_sizing_margin
+    except ImportError:
+        try:
+            import position_sizing_margin
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return position_sizing_margin.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     try:
         from . import issue1_risk_exit_policy
@@ -358,6 +393,7 @@ def start(
     _install_fifteen_minute_strategy_classifier(core, setup_worker)
     _install_five_minute_entry_confirmation(core, setup_worker)
     _install_authoritative_entry_risk(core)
+    _install_position_sizing_margin(core, setup_worker)
     _install_python_execution_cutover(core)
     with _LOCK:
         if _THREAD is not None and _THREAD.is_alive():
@@ -416,6 +452,7 @@ def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
             _five_minute_entry_confirmation_status()
         ),
         "authoritativeEntryRisk": _authoritative_entry_risk_status(),
+        "positionSizingMargin": _position_sizing_margin_status(),
         "pythonExecutionCutover": _python_execution_cutover_status(core),
     }
 
