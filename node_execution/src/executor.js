@@ -17,6 +17,12 @@ export class CommandExecutor {
         command = await this.repository.transition(command, 'ORDER_PENDING');
         return this.resolveFill(command, payload, linkId);
       }
+      const executionHistory = await this.bybit.executions(payload.symbol, linkId);
+      const priorExecutions = executionHistory?.result?.list || [];
+      if (priorExecutions.some((row) => Number(row.execQty || 0) > 0)) {
+        command = await this.repository.transition(command, 'ORDER_PENDING');
+        return this.repository.transition(command, 'MANAGING');
+      }
 
       const [wallet, instrument, position] = await Promise.all([
         this.bybit.wallet(),
