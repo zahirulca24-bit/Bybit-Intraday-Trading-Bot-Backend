@@ -18,6 +18,7 @@ _STATE: dict[str, Any] = {
     "lastSymbolRunAt": 0,
     "lastSetupRunAt": 0,
     "lastEntryRunAt": 0,
+    "lastRiskRunAt": 0,
     "lastExecutionRunAt": 0,
     "nextSymbolRunAt": 0,
     "nextSetupRunAt": 0,
@@ -25,6 +26,7 @@ _STATE: dict[str, Any] = {
     "symbolRuns": 0,
     "setupRuns": 0,
     "entryRuns": 0,
+    "riskRuns": 0,
     "executionRuns": 0,
     "legacySetupWorkerDisabled": True,
     "legacyPythonExecutionDisabled": True,
@@ -57,6 +59,7 @@ def settings() -> dict[str, Any]:
         "legacySetupWorkerEnabled": False,
         "legacyPythonExecutionEnabled": False,
         "entryConfirmationCadence": "NEW_CLOSED_5M_ON_SETUP_CYCLE",
+        "riskDecisionCadence": "AFTER_CLOSED_5M_ENTRY_CONFIRMATION",
     }
 
 
@@ -78,6 +81,16 @@ def _run_five_minute_entry_confirmation(
     except ImportError:
         import five_minute_entry_confirmation
     return five_minute_entry_confirmation.ensure_current(core, now=now)
+
+
+def _run_authoritative_entry_risk(
+    core: Any, now: int
+) -> dict[str, Any]:
+    try:
+        from . import authoritative_entry_risk
+    except ImportError:
+        import authoritative_entry_risk
+    return authoritative_entry_risk.ensure_current(core, now=now)
 
 
 def run_due_once(
@@ -107,18 +120,21 @@ def run_due_once(
         if setup_due:
             _run_fifteen_minute_strategy_classifier(core, timestamp)
             _run_five_minute_entry_confirmation(core, timestamp)
+            _run_authoritative_entry_risk(core, timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
                 _STATE["lastEntryRunAt"] = timestamp
+                _STATE["lastRiskRunAt"] = timestamp
                 _STATE["nextSetupRunAt"] = (
                     timestamp + int(cfg["setupIntervalSeconds"])
                 )
                 _STATE["setupRuns"] = int(_STATE.get("setupRuns") or 0) + 1
                 _STATE["entryRuns"] = int(_STATE.get("entryRuns") or 0) + 1
+                _STATE["riskRuns"] = int(_STATE.get("riskRuns") or 0) + 1
 
-        # Deliberate Step-6 cutover: do not call setup_worker.run_batch() and do
-        # not call execution_handoff.run_once(). The modules remain available
-        # for audit/rollback, but new entries wait for Node.js execution.
+        # Deliberate cutover: do not call setup_worker.run_batch() and do not
+        # call execution_handoff.run_once(). The modules remain available for
+        # audit/rollback, but new entries wait for Node.js execution.
         with _LOCK:
             _STATE["legacySetupWorkerDisabled"] = True
             _STATE["legacyPythonExecutionDisabled"] = True
@@ -251,6 +267,25 @@ def _five_minute_entry_confirmation_status() -> dict[str, Any]:
     return five_minute_entry_confirmation.snapshot()
 
 
+def _install_authoritative_entry_risk(core: Any) -> None:
+    try:
+        from . import authoritative_entry_risk
+    except ImportError:
+        import authoritative_entry_risk
+    authoritative_entry_risk.install(core)
+
+
+def _authoritative_entry_risk_status() -> dict[str, Any]:
+    try:
+        from . import authoritative_entry_risk
+    except ImportError:
+        try:
+            import authoritative_entry_risk
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return authoritative_entry_risk.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     try:
         from . import issue1_risk_exit_policy
@@ -322,6 +357,7 @@ def start(
     _install_strategy_step3(core)
     _install_fifteen_minute_strategy_classifier(core, setup_worker)
     _install_five_minute_entry_confirmation(core, setup_worker)
+    _install_authoritative_entry_risk(core)
     _install_python_execution_cutover(core)
     with _LOCK:
         if _THREAD is not None and _THREAD.is_alive():
@@ -379,6 +415,7 @@ def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
         "fiveMinuteEntryConfirmation": (
             _five_minute_entry_confirmation_status()
         ),
+        "authoritativeEntryRisk": _authoritative_entry_risk_status(),
         "pythonExecutionCutover": _python_execution_cutover_status(core),
     }
 
