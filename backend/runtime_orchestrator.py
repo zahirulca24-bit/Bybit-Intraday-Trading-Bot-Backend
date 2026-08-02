@@ -145,6 +145,26 @@ def _four_hour_directional_pool_status() -> dict[str, Any]:
     return four_hour_directional_pool.snapshot()
 
 
+def _install_hourly_watchlist(core: Any, symbol_worker: Any) -> None:
+    """Expose the persistent closed-1H Top-20 list through the existing worker API."""
+    try:
+        from . import hourly_watchlist
+    except ImportError:
+        import hourly_watchlist
+    hourly_watchlist.install(core, symbol_worker)
+
+
+def _hourly_watchlist_status() -> dict[str, Any]:
+    try:
+        from . import hourly_watchlist
+    except ImportError:
+        try:
+            import hourly_watchlist
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return hourly_watchlist.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     """Install after durable state exists and before automatic workers start."""
     try:
@@ -194,6 +214,7 @@ def start(
     global _THREAD
     _install_daily_universe(core, symbol_worker)
     _install_four_hour_directional_pool(core, symbol_worker)
+    _install_hourly_watchlist(core, symbol_worker)
     _install_issue1_policy(core)
     _install_strategy_step1(core)
     _install_strategy_step2(core, setup_worker)
@@ -243,6 +264,7 @@ def snapshot_unlocked() -> dict[str, Any]:
         "settings": settings(),
         "dailyUniverse": _daily_universe_status(),
         "fourHourDirectionalPool": _four_hour_directional_pool_status(),
+        "hourlyWatchlist": _hourly_watchlist_status(),
     }
 
 
