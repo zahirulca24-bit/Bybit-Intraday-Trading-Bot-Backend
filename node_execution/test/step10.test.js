@@ -12,6 +12,12 @@ const payload = {
   requiredInitialMarginUsdt:20, projectedTotalInitialMarginUsdt:40,
 };
 
+const liveTruth = {
+  wallet:async()=>({result:{list:[{totalEquity:'1000',totalAvailableBalance:'800'}]}}),
+  instrument:async()=>({result:{list:[{lotSizeFilter:{minOrderQty:'0.001',maxMarketOrderQty:'10'}}]}}),
+  position:async()=>({result:{list:[]}}),
+};
+
 test('configuration is demo-only and disabled by default', () => {
   const cfg = loadConfig({DATABASE_URL:'postgres://x',BYBIT_API_KEY:'k',BYBIT_API_SECRET:'s'});
   assert.equal(cfg.baseUrl, 'https://api-demo.bybit.com');
@@ -39,20 +45,27 @@ test('contract and live margin are revalidated', () => {
 test('executor transitions to managing only after full fill', async () => {
   const transitions=[];
   const repo={transition:async(c,next)=>{transitions.push(next);return {...c,state:next};}};
-  const bybit={
-    openOrder:async()=>({result:{list:[]}}), wallet:async()=>({result:{list:[{totalEquity:'1000',totalAvailableBalance:'800'}]}}),
-    instrument:async()=>({result:{list:[{lotSizeFilter:{minOrderQty:'0.001',maxMarketOrderQty:'10'}}]}}), position:async()=>({result:{list:[]}}),
-    setMarginMode:async()=>({}), setLeverage:async()=>({}), createOrder:async()=>({}), waitForFill:async()=>({state:'FILLED'})
-  };
+  const bybit={openOrder:async()=>({result:{list:[]}}),executions:async()=>({result:{list:[]}}),...liveTruth,setMarginMode:async()=>({}),setLeverage:async()=>({}),createOrder:async()=>({}),waitForFill:async()=>({state:'FILLED'})};
   const result=await new CommandExecutor(repo,bybit).execute({candidateKey:'cand-1',state:'RESERVED',ownerId:'o',payload});
   assert.deepEqual(transitions,['ORDER_PENDING','MANAGING']);
+  assert.equal(result.state,'MANAGING');
+});
+
+test('prior execution history prevents restart resubmission', async () => {
+  const transitions=[];
+  let created=0;
+  const repo={transition:async(c,next)=>{transitions.push(next);return {...c,state:next};}};
+  const bybit={openOrder:async()=>({result:{list:[]}}),executions:async()=>({result:{list:[{execQty:'0.01'}]}}),createOrder:async()=>{created+=1;}};
+  const result=await new CommandExecutor(repo,bybit).execute({candidateKey:'cand-1',state:'RESERVED',ownerId:'o',payload});
+  assert.deepEqual(transitions,['ORDER_PENDING','MANAGING']);
+  assert.equal(created,0);
   assert.equal(result.state,'MANAGING');
 });
 
 test('unknown fill remains order pending fail-closed', async () => {
   const transitions=[];
   const repo={transition:async(c,next)=>{transitions.push(next);return {...c,state:next};}};
-  const bybit={openOrder:async()=>({result:{list:[]}}),wallet:async()=>({result:{list:[{totalEquity:'1000',totalAvailableBalance:'800'}]}}),instrument:async()=>({result:{list:[{lotSizeFilter:{minOrderQty:'0.001',maxMarketOrderQty:'10'}}]}}),position:async()=>({result:{list:[]}}),setMarginMode:async()=>({}),setLeverage:async()=>({}),createOrder:async()=>({}),waitForFill:async()=>({state:'UNKNOWN'})};
+  const bybit={openOrder:async()=>({result:{list:[]}}),executions:async()=>({result:{list:[]}}),...liveTruth,setMarginMode:async()=>({}),setLeverage:async()=>({}),createOrder:async()=>({}),waitForFill:async()=>({state:'UNKNOWN'})};
   const result=await new CommandExecutor(repo,bybit).execute({candidateKey:'cand-1',state:'RESERVED',ownerId:'o',payload});
   assert.deepEqual(transitions,['ORDER_PENDING']);
   assert.equal(result.state,'ORDER_PENDING');
