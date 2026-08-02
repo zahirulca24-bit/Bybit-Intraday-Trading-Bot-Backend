@@ -1,0 +1,78 @@
+name: Node Execution Step 10 CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "node_execution/**"
+      - ".github/workflows/node-execution-step10-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "node_execution/**"
+      - ".github/workflows/node-execution-step10-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  node-execution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Node dependencies
+        working-directory: node_execution
+        run: npm install --ignore-scripts --no-audit --no-fund
+
+      - name: Compile-check Node execution service
+        working-directory: node_execution
+        run: npm run check
+
+      - name: Run Step 10 unit tests
+        working-directory: node_execution
+        run: npm test
+
+      - name: Verify demo-only and fail-closed boundaries
+        working-directory: node_execution
+        run: |
+          node - <<'JS'
+          import fs from 'node:fs';
+          const files = ['src/config.js','src/bybitClient.js','src/executor.js','src/httpServer.js','src/index.js'];
+          const source = files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
+          if (source.includes('https://api.bybit.com')) throw new Error('Production Bybit endpoint is forbidden');
+          if (!source.includes('https://api-demo.bybit.com')) throw new Error('Demo endpoint lock missing');
+          if (!source.includes("NODE_EXECUTION_ENABLED || 'false'")) throw new Error('Fail-closed execution default missing');
+          if (!source.includes("server.listen(port, '0.0.0.0'")) throw new Error('Cloud Run PORT listener missing');
+          JS
+
+      - name: Build Cloud Run container
+        run: docker build -f node_execution/Dockerfile -t bybit-node-execution-step10 node_execution
+
+      - name: Smoke-test container health endpoint
+        run: |
+          docker run --rm -d --name bybit-node-execution-step10 \
+            -p 18080:8080 \
+            -e PORT=8080 \
+            -e DATABASE_URL=postgresql://disabled:disabled@127.0.0.1:5432/disabled \
+            -e BYBIT_API_KEY=disabled \
+            -e BYBIT_API_SECRET=disabled \
+            -e NODE_EXECUTION_OWNER_ID=ci-node-executor \
+            -e NODE_EXECUTION_ENABLED=false \
+            bybit-node-execution-step10
+          trap 'docker logs bybit-node-execution-step10 || true; docker stop bybit-node-execution-step10 || true' EXIT
+          for attempt in $(seq 1 20); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz >/tmp/health.json; then
+              cat /tmp/health.json
+              exit 0
+            fi
+            sleep 1
+          done
+          echo 'Container did not become healthy' >&2
+          exit 1
