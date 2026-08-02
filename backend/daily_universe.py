@@ -123,14 +123,19 @@ def _load_persisted() -> None:
         return
     if not isinstance(saved, dict):
         return
-    symbols = [str(value or "").upper() for value in saved.get("symbols") or []]
-    rows = [dict(row) for row in saved.get("rows") or [] if isinstance(row, dict)]
-    if not symbols or not rows:
+    raw_symbols = saved.get("symbols")
+    raw_rows = saved.get("rows")
+    if not isinstance(raw_symbols, list) or not isinstance(raw_rows, list):
         return
+    symbols = [str(value or "").upper() for value in raw_symbols if str(value or "").strip()]
+    rows = [dict(row) for row in raw_rows if isinstance(row, dict)]
+    if bool(symbols) != bool(rows):
+        return
+    status = "ready" if symbols else "empty"
     with _STATE_LOCK:
         _STATE.update(
             {
-                "status": "ready",
+                "status": str(saved.get("status") or status),
                 "version": int(saved.get("version") or 1),
                 "source": str(saved.get("source") or "daily_1d_4h_aligned_trend"),
                 "runDayUtc": saved.get("runDayUtc"),
@@ -138,7 +143,7 @@ def _load_persisted() -> None:
                 "symbols": symbols,
                 "rows": rows,
                 "metrics": dict(saved.get("metrics") or {}),
-                "lastError": None,
+                "lastError": saved.get("lastError"),
                 "persisted": True,
             }
         )
@@ -148,6 +153,7 @@ def _persist(payload: dict[str, Any]) -> bool:
     if _STORE is None:
         return False
     body = {
+        "status": payload["status"],
         "version": payload["version"],
         "source": payload["source"],
         "runDayUtc": payload["runDayUtc"],
@@ -155,6 +161,7 @@ def _persist(payload: dict[str, Any]) -> bool:
         "symbols": payload["symbols"],
         "rows": payload["rows"],
         "metrics": payload["metrics"],
+        "lastError": payload.get("lastError"),
     }
     try:
         _STORE.put(_PERSIST_KEY, body)
@@ -299,7 +306,7 @@ def due(now: int | None = None) -> bool:
     timestamp = int(now or time.time())
     target = _target_run_day(timestamp)
     with _STATE_LOCK:
-        return not _STATE.get("symbols") or str(_STATE.get("runDayUtc") or "") != target
+        return str(_STATE.get("runDayUtc") or "") != target
 
 
 def ensure_current(core: Any, now: int | None = None) -> dict[str, Any]:
