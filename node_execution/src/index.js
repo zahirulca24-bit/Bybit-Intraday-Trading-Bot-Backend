@@ -1,41 +1,127 @@
-import os from 'node:os';
 import pg from 'pg';
 import { loadConfig } from './config.js';
 import { BybitClient } from './bybitClient.js';
 import { ExecutionRepository } from './repository.js';
 import { CommandExecutor } from './executor.js';
+import { createHealthServer } from './httpServer.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const config = loadConfig();
-if (!config.enabled) {
-  console.error('NODE_EXECUTION_ENABLED is false; fail-closed startup.');
-  process.exit(2);
-}
-const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 6 });
+const runtime = {
+  enabled: config.enabled,
+  ready: false,
+  leader: false,
+  databaseReady: false,
+  migrationVersion: 0,
+  startedAt: new Date().toISOString(),
+  lastError: null,
+  slots: Object.fromEntries([1, 2, 3].map((slotId) => [slotId, { state: 'IDLE', candidateKey: null, updatedAt: null }])),
+};
+
+const server = await createHealthServer(runtime, config.port);
+console.log(JSON.stringify({ level: 'info', event: 'http_listening', port: config.port }));
+
+const pool = new pg.Pool({
+  connectionString: config.databaseUrl,
+  max: 8,
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
+  application_name: 'bybit-node-execution-step10',
+});
 const repository = new ExecutionRepository(pool);
-const executor = new CommandExecutor(repository, new BybitClient(config));
+const bybit = new BybitClient(config);
+const executor = new CommandExecutor(repository, bybit, config);
 let stopping = false;
+let workersStarted = false;
+
+function setSlot(slotId, state, candidateKey = null) {
+  runtime.slots[slotId] = { state, candidateKey, updatedAt: new Date().toISOString() };
+}
 
 async function slotLoop(slotId) {
-  const ownerId = `${config.ownerPrefix}-${os.hostname()}-${process.pid}-slot${slotId}`;
-  while (!stopping) {
+  const ownerId = `${config.ownerId}:slot${slotId}`;
+  setSlot(slotId, 'WAITING');
+  while (!stopping && runtime.leader) {
+    let command = null;
     try {
-      const command = await repository.claim(ownerId, slotId);
-      if (!command) { await sleep(config.pollMs); continue; }
-      await executor.execute(command);
+      command = await repository.ownedExecutionCommand(ownerId, slotId);
+      if (!command) command = await repository.claim(ownerId, slotId);
+      if (!command) {
+        setSlot(slotId, 'WAITING');
+        await sleep(config.pollMs);
+        continue;
+      }
+      setSlot(slotId, command.state, command.candidateKey);
+      const result = await executor.execute(command);
+      setSlot(slotId, result?.state || 'UNKNOWN', command.candidateKey);
     } catch (error) {
-      console.error(JSON.stringify({ level: 'error', slotId, message: error.message, time: new Date().toISOString() }));
+      runtime.lastError = error.message;
+      setSlot(slotId, command?.state || 'ERROR', command?.candidateKey || null);
+      console.error(JSON.stringify({
+        level: 'error',
+        event: 'slot_error',
+        slotId,
+        candidateKey: command?.candidateKey || null,
+        message: error.message,
+        time: new Date().toISOString(),
+      }));
       await sleep(config.pollMs);
     }
   }
 }
 
-for (const signal of ['SIGTERM','SIGINT']) {
-  process.on(signal, async () => {
-    stopping = true;
-    await pool.end().catch(() => undefined);
-    process.exit(0);
+async function coordinator() {
+  if (!config.enabled) {
+    runtime.lastError = 'NODE_EXECUTION_ENABLED is false; execution remains fail-closed.';
+    console.log(JSON.stringify({ level: 'warn', event: 'execution_disabled' }));
+    return;
+  }
+  while (!stopping && !workersStarted) {
+    try {
+      const database = await repository.ping();
+      runtime.databaseReady = database.ok;
+      runtime.migrationVersion = database.migrationVersion;
+      if (!database.ok) throw new Error('PostgreSQL migration v5 execution contract is unavailable');
+      runtime.leader = await repository.acquireLeadership();
+      if (!runtime.leader) {
+        runtime.lastError = 'Another Node execution instance owns the PostgreSQL leader lock.';
+        await sleep(config.pollMs);
+        continue;
+      }
+      runtime.ready = true;
+      runtime.lastError = null;
+      workersStarted = true;
+      console.log(JSON.stringify({ level: 'info', event: 'execution_leader_ready', ownerId: config.ownerId }));
+      await Promise.all([1, 2, 3].map(slotLoop));
+    } catch (error) {
+      runtime.ready = false;
+      runtime.lastError = error.message;
+      console.error(JSON.stringify({ level: 'error', event: 'coordinator_error', message: error.message }));
+      await sleep(config.pollMs);
+    }
+  }
+}
+
+async function shutdown(signal) {
+  if (stopping) return;
+  stopping = true;
+  runtime.ready = false;
+  console.log(JSON.stringify({ level: 'info', event: 'shutdown', signal }));
+  await repository.releaseLeadership().catch(() => undefined);
+  await pool.end().catch(() => undefined);
+  await new Promise((resolve) => server.close(resolve));
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => {
+    shutdown(signal).finally(() => process.exit(0));
   });
 }
 
-await Promise.all([1,2,3].map(slotLoop));
+process.on('unhandledRejection', (error) => {
+  runtime.ready = false;
+  runtime.lastError = error?.message || String(error);
+  console.error(JSON.stringify({ level: 'fatal', event: 'unhandled_rejection', message: runtime.lastError }));
+});
+
+void coordinator();
