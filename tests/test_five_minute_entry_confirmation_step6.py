@@ -227,8 +227,9 @@ def test_confirmation_snapshot_is_persisted_and_reloaded():
     assert result["persisted"] is True
 
     confirmation._reset_for_tests()
-    core._durable_state_store = store
-    confirmation.install(core, SetupWorkerStub())
+    restarted_core = CoreStub()
+    restarted_core._durable_state_store = store
+    confirmation.install(restarted_core, SetupWorkerStub())
     restored = confirmation.snapshot()
 
     assert restored["fiveMinuteCandleTime"] == 3_600_000
