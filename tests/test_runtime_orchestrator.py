@@ -40,6 +40,7 @@ def reset_state():
                 "lastSymbolRunAt": 0,
                 "lastSetupRunAt": 0,
                 "lastEntryRunAt": 0,
+                "lastRiskRunAt": 0,
                 "lastExecutionRunAt": 0,
                 "nextSymbolRunAt": 0,
                 "nextSetupRunAt": 0,
@@ -47,6 +48,7 @@ def reset_state():
                 "symbolRuns": 0,
                 "setupRuns": 0,
                 "entryRuns": 0,
+                "riskRuns": 0,
                 "executionRuns": 0,
                 "legacySetupWorkerDisabled": True,
                 "legacyPythonExecutionDisabled": True,
@@ -56,7 +58,7 @@ def reset_state():
 
 
 def install_stage_spies(monkeypatch):
-    calls = {"classification": [], "entry": []}
+    calls = {"classification": [], "entry": [], "risk": []}
 
     def classification(core, now):
         calls["classification"].append(now)
@@ -64,6 +66,10 @@ def install_stage_spies(monkeypatch):
 
     def entry(core, now):
         calls["entry"].append(now)
+        return {"status": "ready"}
+
+    def risk(core, now):
+        calls["risk"].append(now)
         return {"status": "ready"}
 
     monkeypatch.setattr(
@@ -75,6 +81,11 @@ def install_stage_spies(monkeypatch):
         orchestrator,
         "_run_five_minute_entry_confirmation",
         entry,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_authoritative_entry_risk",
+        risk,
     )
     return calls
 
@@ -95,6 +106,7 @@ def test_due_stages_run_immediately_without_legacy_workers(monkeypatch):
     assert symbol.calls == [1000]
     assert calls["classification"] == [1000]
     assert calls["entry"] == [1000]
+    assert calls["risk"] == [1000]
     assert setup.calls == []
     assert execution.calls == []
     assert state["nextSymbolRunAt"] == 1300
@@ -103,6 +115,7 @@ def test_due_stages_run_immediately_without_legacy_workers(monkeypatch):
     assert state["symbolRuns"] == 1
     assert state["setupRuns"] == 1
     assert state["entryRuns"] == 1
+    assert state["riskRuns"] == 1
     assert state["executionRuns"] == 0
     assert state["legacySetupWorkerDisabled"] is True
     assert state["legacyPythonExecutionDisabled"] is True
@@ -122,6 +135,7 @@ def test_stages_do_not_repeat_before_interval(monkeypatch):
     assert symbol.calls == [1000]
     assert calls["classification"] == [1000]
     assert calls["entry"] == [1000]
+    assert calls["risk"] == [1000]
     assert setup.calls == []
 
 
@@ -139,10 +153,12 @@ def test_stages_run_again_when_due(monkeypatch):
     assert symbol.calls == [1000, 1300]
     assert calls["classification"] == [1000, 1300]
     assert calls["entry"] == [1000, 1300]
+    assert calls["risk"] == [1000, 1300]
     assert setup.calls == []
     assert state["symbolRuns"] == 2
     assert state["setupRuns"] == 2
     assert state["entryRuns"] == 2
+    assert state["riskRuns"] == 2
 
 
 def test_orchestrator_never_runs_legacy_execution_handoff(monkeypatch):
