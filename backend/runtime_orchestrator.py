@@ -45,6 +45,14 @@ def settings() -> dict[str, int]:
     }
 
 
+def _run_fifteen_minute_strategy_classifier(core: Any, now: int) -> dict[str, Any]:
+    try:
+        from . import fifteen_minute_strategy_classifier
+    except ImportError:
+        import fifteen_minute_strategy_classifier
+    return fifteen_minute_strategy_classifier.ensure_current(core, now=now)
+
+
 def run_due_once(
     core: Any,
     symbol_worker: Any,
@@ -69,6 +77,7 @@ def run_due_once(
                 _STATE["symbolRuns"] = int(_STATE.get("symbolRuns") or 0) + 1
 
         if setup_due:
+            _run_fifteen_minute_strategy_classifier(core, timestamp)
             setup_worker.run_batch(core, symbol_worker, now=timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
@@ -165,6 +174,26 @@ def _hourly_watchlist_status() -> dict[str, Any]:
     return hourly_watchlist.snapshot()
 
 
+def _install_fifteen_minute_strategy_classifier(core: Any, setup_worker: Any) -> None:
+    """Install additive closed-15M classification without replacing entry handoff."""
+    try:
+        from . import fifteen_minute_strategy_classifier
+    except ImportError:
+        import fifteen_minute_strategy_classifier
+    fifteen_minute_strategy_classifier.install(core, setup_worker)
+
+
+def _fifteen_minute_strategy_classifier_status() -> dict[str, Any]:
+    try:
+        from . import fifteen_minute_strategy_classifier
+    except ImportError:
+        try:
+            import fifteen_minute_strategy_classifier
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return fifteen_minute_strategy_classifier.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     """Install after durable state exists and before automatic workers start."""
     try:
@@ -219,6 +248,7 @@ def start(
     _install_strategy_step1(core)
     _install_strategy_step2(core, setup_worker)
     _install_strategy_step3(core)
+    _install_fifteen_minute_strategy_classifier(core, setup_worker)
     with _LOCK:
         if _THREAD is not None and _THREAD.is_alive():
             return snapshot_unlocked()
@@ -265,6 +295,7 @@ def snapshot_unlocked() -> dict[str, Any]:
         "dailyUniverse": _daily_universe_status(),
         "fourHourDirectionalPool": _four_hour_directional_pool_status(),
         "hourlyWatchlist": _hourly_watchlist_status(),
+        "fifteenMinuteStrategyClassification": _fifteen_minute_strategy_classifier_status(),
     }
 
 
