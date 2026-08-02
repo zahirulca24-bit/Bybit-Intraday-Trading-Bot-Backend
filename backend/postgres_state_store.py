@@ -20,10 +20,18 @@ except ImportError:  # pragma: no cover - reported by status()
     Jsonb = None
 
 try:
+    from .execution_command_storage import (
+        EXECUTION_COMMAND_MIGRATION,
+        ExecutionCommandStorageMixin,
+    )
     from .live_execution_storage import LIVE_EXECUTION_MIGRATION
     from .replay_step_repository import REPLAY_STEP_MIGRATION
     from .replay_storage import REPLAY_MIGRATION, ReplayStorageMixin
 except ImportError:
+    from execution_command_storage import (
+        EXECUTION_COMMAND_MIGRATION,
+        ExecutionCommandStorageMixin,
+    )
     from live_execution_storage import LIVE_EXECUTION_MIGRATION
     from replay_step_repository import REPLAY_STEP_MIGRATION
     from replay_storage import REPLAY_MIGRATION, ReplayStorageMixin
@@ -47,10 +55,11 @@ MIGRATIONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     REPLAY_MIGRATION,
     REPLAY_STEP_MIGRATION,
     LIVE_EXECUTION_MIGRATION,
+    EXECUTION_COMMAND_MIGRATION,
 )
 
 
-class PostgresStateStore(ReplayStorageMixin):
+class PostgresStateStore(ExecutionCommandStorageMixin, ReplayStorageMixin):
     def __init__(self, database_url: str | None = None):
         self.database_url = database_url or os.environ.get("DATABASE_URL", "")
         self.lock = threading.RLock()

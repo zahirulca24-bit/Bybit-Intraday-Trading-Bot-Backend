@@ -20,6 +20,7 @@ _STATE: dict[str, Any] = {
     "lastEntryRunAt": 0,
     "lastRiskRunAt": 0,
     "lastSizingRunAt": 0,
+    "lastCommandPublishAt": 0,
     "lastExecutionRunAt": 0,
     "nextSymbolRunAt": 0,
     "nextSetupRunAt": 0,
@@ -29,6 +30,7 @@ _STATE: dict[str, Any] = {
     "entryRuns": 0,
     "riskRuns": 0,
     "sizingRuns": 0,
+    "commandPublishRuns": 0,
     "executionRuns": 0,
     "legacySetupWorkerDisabled": True,
     "legacyPythonExecutionDisabled": True,
@@ -63,6 +65,7 @@ def settings() -> dict[str, Any]:
         "entryConfirmationCadence": "NEW_CLOSED_5M_ON_SETUP_CYCLE",
         "riskDecisionCadence": "AFTER_CLOSED_5M_ENTRY_CONFIRMATION",
         "positionSizingCadence": "AFTER_AUTHORITATIVE_RISK_APPROVAL",
+        "executionCommandPublishCadence": "AFTER_POSITION_SIZING_APPROVAL",
     }
 
 
@@ -106,6 +109,16 @@ def _run_position_sizing_margin(
     return position_sizing_margin.ensure_current(core, now=now)
 
 
+def _run_execution_command_outbox(
+    core: Any, now: int
+) -> dict[str, Any]:
+    try:
+        from . import execution_command_outbox
+    except ImportError:
+        import execution_command_outbox
+    return execution_command_outbox.ensure_current(core, now=now)
+
+
 def run_due_once(
     core: Any,
     symbol_worker: Any,
@@ -135,11 +148,13 @@ def run_due_once(
             _run_five_minute_entry_confirmation(core, timestamp)
             _run_authoritative_entry_risk(core, timestamp)
             _run_position_sizing_margin(core, timestamp)
+            _run_execution_command_outbox(core, timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
                 _STATE["lastEntryRunAt"] = timestamp
                 _STATE["lastRiskRunAt"] = timestamp
                 _STATE["lastSizingRunAt"] = timestamp
+                _STATE["lastCommandPublishAt"] = timestamp
                 _STATE["nextSetupRunAt"] = (
                     timestamp + int(cfg["setupIntervalSeconds"])
                 )
@@ -147,10 +162,13 @@ def run_due_once(
                 _STATE["entryRuns"] = int(_STATE.get("entryRuns") or 0) + 1
                 _STATE["riskRuns"] = int(_STATE.get("riskRuns") or 0) + 1
                 _STATE["sizingRuns"] = int(_STATE.get("sizingRuns") or 0) + 1
+                _STATE["commandPublishRuns"] = int(
+                    _STATE.get("commandPublishRuns") or 0
+                ) + 1
 
         # Deliberate cutover: do not call setup_worker.run_batch() and do not
-        # call execution_handoff.run_once(). The modules remain available for
-        # audit/rollback, but new entries wait for Node.js execution.
+        # call execution_handoff.run_once(). Python may publish immutable
+        # commands, but Node.js owns future claim and order execution.
         with _LOCK:
             _STATE["legacySetupWorkerDisabled"] = True
             _STATE["legacyPythonExecutionDisabled"] = True
@@ -321,6 +339,25 @@ def _position_sizing_margin_status() -> dict[str, Any]:
     return position_sizing_margin.snapshot()
 
 
+def _install_execution_command_outbox(core: Any) -> None:
+    try:
+        from . import execution_command_outbox
+    except ImportError:
+        import execution_command_outbox
+    execution_command_outbox.install(core)
+
+
+def _execution_command_outbox_status(core: Any | None = None) -> dict[str, Any]:
+    try:
+        from . import execution_command_outbox
+    except ImportError:
+        try:
+            import execution_command_outbox
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return execution_command_outbox.status(core)
+
+
 def _install_issue1_policy(core: Any) -> None:
     try:
         from . import issue1_risk_exit_policy
@@ -394,6 +431,7 @@ def start(
     _install_five_minute_entry_confirmation(core, setup_worker)
     _install_authoritative_entry_risk(core)
     _install_position_sizing_margin(core, setup_worker)
+    _install_execution_command_outbox(core)
     _install_python_execution_cutover(core)
     with _LOCK:
         if _THREAD is not None and _THREAD.is_alive():
@@ -453,6 +491,7 @@ def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
         ),
         "authoritativeEntryRisk": _authoritative_entry_risk_status(),
         "positionSizingMargin": _position_sizing_margin_status(),
+        "executionCommandOutbox": _execution_command_outbox_status(core),
         "pythonExecutionCutover": _python_execution_cutover_status(core),
     }
 
