@@ -105,6 +105,26 @@ def _loop(core: Any, symbol_worker: Any, setup_worker: Any, execution_handoff: A
         _STATE["stoppedAt"] = int(time.time())
 
 
+def _install_daily_universe(core: Any, symbol_worker: Any) -> None:
+    """Install the persistent daily Top-100 source after durable state exists."""
+    try:
+        from . import daily_universe
+    except ImportError:
+        import daily_universe
+    daily_universe.install(core, symbol_worker)
+
+
+def _daily_universe_status() -> dict[str, Any]:
+    try:
+        from . import daily_universe
+    except ImportError:
+        try:
+            import daily_universe
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return daily_universe.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     """Install after durable state exists and before automatic workers start."""
     try:
@@ -152,6 +172,7 @@ def start(
 ) -> dict[str, Any]:
     """Start exactly one daemon scheduler and make all configured stages due."""
     global _THREAD
+    _install_daily_universe(core, symbol_worker)
     _install_issue1_policy(core)
     _install_strategy_step1(core)
     _install_strategy_step2(core, setup_worker)
@@ -199,6 +220,7 @@ def snapshot_unlocked() -> dict[str, Any]:
         **dict(_STATE),
         "threadAlive": bool(_THREAD is not None and _THREAD.is_alive()),
         "settings": settings(),
+        "dailyUniverse": _daily_universe_status(),
     }
 
 
