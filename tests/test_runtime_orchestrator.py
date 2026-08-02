@@ -42,6 +42,7 @@ def reset_state():
                 "lastEntryRunAt": 0,
                 "lastRiskRunAt": 0,
                 "lastSizingRunAt": 0,
+                "lastCommandPublishAt": 0,
                 "lastExecutionRunAt": 0,
                 "nextSymbolRunAt": 0,
                 "nextSetupRunAt": 0,
@@ -51,6 +52,7 @@ def reset_state():
                 "entryRuns": 0,
                 "riskRuns": 0,
                 "sizingRuns": 0,
+                "commandPublishRuns": 0,
                 "executionRuns": 0,
                 "legacySetupWorkerDisabled": True,
                 "legacyPythonExecutionDisabled": True,
@@ -60,7 +62,13 @@ def reset_state():
 
 
 def install_stage_spies(monkeypatch):
-    calls = {"classification": [], "entry": [], "risk": [], "sizing": []}
+    calls = {
+        "classification": [],
+        "entry": [],
+        "risk": [],
+        "sizing": [],
+        "outbox": [],
+    }
 
     def classification(core, now):
         calls["classification"].append(now)
@@ -76,6 +84,10 @@ def install_stage_spies(monkeypatch):
 
     def sizing(core, now):
         calls["sizing"].append(now)
+        return {"status": "ready"}
+
+    def outbox(core, now):
+        calls["outbox"].append(now)
         return {"status": "ready"}
 
     monkeypatch.setattr(
@@ -98,6 +110,11 @@ def install_stage_spies(monkeypatch):
         "_run_position_sizing_margin",
         sizing,
     )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_execution_command_outbox",
+        outbox,
+    )
     return calls
 
 
@@ -119,6 +136,7 @@ def test_due_stages_run_immediately_without_legacy_workers(monkeypatch):
     assert calls["entry"] == [1000]
     assert calls["risk"] == [1000]
     assert calls["sizing"] == [1000]
+    assert calls["outbox"] == [1000]
     assert setup.calls == []
     assert execution.calls == []
     assert state["nextSymbolRunAt"] == 1300
@@ -129,6 +147,8 @@ def test_due_stages_run_immediately_without_legacy_workers(monkeypatch):
     assert state["entryRuns"] == 1
     assert state["riskRuns"] == 1
     assert state["sizingRuns"] == 1
+    assert state["commandPublishRuns"] == 1
+    assert state["lastCommandPublishAt"] == 1000
     assert state["executionRuns"] == 0
     assert state["legacySetupWorkerDisabled"] is True
     assert state["legacyPythonExecutionDisabled"] is True
@@ -150,6 +170,7 @@ def test_stages_do_not_repeat_before_interval(monkeypatch):
     assert calls["entry"] == [1000]
     assert calls["risk"] == [1000]
     assert calls["sizing"] == [1000]
+    assert calls["outbox"] == [1000]
     assert setup.calls == []
 
 
@@ -169,12 +190,14 @@ def test_stages_run_again_when_due(monkeypatch):
     assert calls["entry"] == [1000, 1300]
     assert calls["risk"] == [1000, 1300]
     assert calls["sizing"] == [1000, 1300]
+    assert calls["outbox"] == [1000, 1300]
     assert setup.calls == []
     assert state["symbolRuns"] == 2
     assert state["setupRuns"] == 2
     assert state["entryRuns"] == 2
     assert state["riskRuns"] == 2
     assert state["sizingRuns"] == 2
+    assert state["commandPublishRuns"] == 2
 
 
 def test_orchestrator_never_runs_legacy_execution_handoff(monkeypatch):
