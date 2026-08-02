@@ -1,0 +1,43 @@
+name: Node Execution Step 10 CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "node_execution/**"
+      - ".github/workflows/node-execution-step10-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - "node_execution/**"
+      - ".github/workflows/node-execution-step10-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  node-execution:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: node_execution
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: node_execution/package-lock.json
+      - run: npm install --package-lock-only
+      - run: npm ci
+      - run: npm test
+      - name: Verify demo-only and fail-closed boundaries
+        run: |
+          node - <<'JS'
+          import fs from 'node:fs';
+          const source = fs.readFileSync('src/config.js','utf8') + fs.readFileSync('src/bybitClient.js','utf8');
+          if (source.includes('https://api.bybit.com')) throw new Error('Production Bybit endpoint is forbidden');
+          if (!source.includes('https://api-demo.bybit.com')) throw new Error('Demo endpoint lock missing');
+          if (!source.includes("NODE_EXECUTION_ENABLED || 'false'")) throw new Error('Fail-closed execution default missing');
+          JS
