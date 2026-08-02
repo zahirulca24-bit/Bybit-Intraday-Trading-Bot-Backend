@@ -125,6 +125,26 @@ def _daily_universe_status() -> dict[str, Any]:
     return daily_universe.snapshot()
 
 
+def _install_four_hour_directional_pool(core: Any, symbol_worker: Any) -> None:
+    """Layer the closed-4H Top-50 source over the installed daily Top-100 source."""
+    try:
+        from . import four_hour_directional_pool
+    except ImportError:
+        import four_hour_directional_pool
+    four_hour_directional_pool.install(core, symbol_worker)
+
+
+def _four_hour_directional_pool_status() -> dict[str, Any]:
+    try:
+        from . import four_hour_directional_pool
+    except ImportError:
+        try:
+            import four_hour_directional_pool
+        except ImportError:
+            return {"installed": False, "status": "unavailable"}
+    return four_hour_directional_pool.snapshot()
+
+
 def _install_issue1_policy(core: Any) -> None:
     """Install after durable state exists and before automatic workers start."""
     try:
@@ -173,6 +193,7 @@ def start(
     """Start exactly one daemon scheduler and make all configured stages due."""
     global _THREAD
     _install_daily_universe(core, symbol_worker)
+    _install_four_hour_directional_pool(core, symbol_worker)
     _install_issue1_policy(core)
     _install_strategy_step1(core)
     _install_strategy_step2(core, setup_worker)
@@ -221,6 +242,7 @@ def snapshot_unlocked() -> dict[str, Any]:
         "threadAlive": bool(_THREAD is not None and _THREAD.is_alive()),
         "settings": settings(),
         "dailyUniverse": _daily_universe_status(),
+        "fourHourDirectionalPool": _four_hour_directional_pool_status(),
     }
 
 
