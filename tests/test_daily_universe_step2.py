@@ -12,11 +12,12 @@ from backend import daily_universe
 class MemoryStore:
     def __init__(self):
         self.values = {}
+        self.degraded = False
 
     def status(self):
         return {
-            "ok": True,
-            "degraded": False,
+            "ok": not self.degraded,
+            "degraded": self.degraded,
             "persistentPathConfigured": True,
         }
 
@@ -65,6 +66,26 @@ class DailyUniverseStep2Tests(unittest.TestCase):
     def classifier(candles):
         last = candles[-1]
         return last["trend"], float(last["score"]), "test trend"
+
+    @staticmethod
+    def fixture(now, count=10):
+        symbols = [f"COIN{index:03d}USDT" for index in range(count)]
+        tickers = {
+            symbol: {
+                "lastPrice": 1.0 + index,
+                "turnover24h": 1_000_000 + index,
+                "spreadPct": 0.05,
+            }
+            for index, symbol in enumerate(symbols)
+        }
+        rows = {
+            symbol: {
+                "D": {"trend": "BULLISH", "score": 90},
+                "240": {"trend": "BULLISH", "score": 90},
+            }
+            for symbol in symbols
+        }
+        return symbols, tickers, rows
 
     def test_selects_top_100_aligned_symbols_and_persists_snapshot(self):
         now = int(datetime(2026, 8, 3, 0, 6, tzinfo=timezone.utc).timestamp())
@@ -116,6 +137,53 @@ class DailyUniverseStep2Tests(unittest.TestCase):
         self.assertEqual(calls["base"], 1)
         persisted = core._durable_state_store.get("daily_master_universe_v1")
         self.assertEqual(persisted["symbols"], result["symbols"])
+
+    def test_rebinds_store_when_postgresql_recovers_after_install(self):
+        now = int(datetime(2026, 8, 3, 0, 6, tzinfo=timezone.utc).timestamp())
+        symbols, tickers, rows = self.fixture(now)
+
+        class Worker:
+            @staticmethod
+            def _fetch_active_usdt_symbols(core):
+                return list(symbols), copy.deepcopy(tickers)
+
+            classify_trend = staticmethod(self.classifier)
+
+        core = FakeCore(rows, now)
+        core._durable_state_store.degraded = True
+        daily_universe.install(core, Worker)
+
+        first = daily_universe.build(core, now=now)
+        self.assertFalse(first["persisted"])
+        self.assertIsNone(core._durable_state_store.get("daily_master_universe_v1"))
+
+        core._durable_state_store.degraded = False
+        recovered = daily_universe.ensure_current(core, now=now + 86_400)
+
+        self.assertTrue(recovered["persisted"])
+        saved = core._durable_state_store.get("daily_master_universe_v1")
+        self.assertEqual(saved["symbols"], recovered["symbols"])
+
+    def test_install_guard_rechecks_recovered_store(self):
+        now = int(datetime(2026, 8, 3, 0, 6, tzinfo=timezone.utc).timestamp())
+        symbols, tickers, rows = self.fixture(now)
+
+        class Worker:
+            @staticmethod
+            def _fetch_active_usdt_symbols(core):
+                return list(symbols), copy.deepcopy(tickers)
+
+            classify_trend = staticmethod(self.classifier)
+
+        core = FakeCore(rows, now)
+        core._durable_state_store.degraded = True
+        daily_universe.install(core, Worker)
+        core._durable_state_store.degraded = False
+
+        daily_universe.install(core, Worker)
+        result = daily_universe.build(core, now=now)
+
+        self.assertTrue(result["persisted"])
 
     def test_timeframe_conflict_is_rejected_and_existing_source_remains_fallback(self):
         now = int(datetime(2026, 8, 3, 0, 6, tzinfo=timezone.utc).timestamp())
