@@ -116,11 +116,39 @@ def test_lost_leader_connection_disables_execution():
     assert core.BOT_STATE["executionGuard"]["ok"] is False
 
 
+def test_standby_runtime_promotes_and_starts_orchestrator(monkeypatch):
+    core = core_for(Connection(granted=False))
+    states = iter((
+        {"leader": False, "reason": "lock held"},
+        {"leader": True, "reason": "lock acquired"},
+    ))
+    starts = []
+
+    monkeypatch.setattr(
+        cloud_run_server.runtime_instance_guard,
+        "acquire",
+        lambda _core: next(states),
+    )
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_ORIGINAL_ORCHESTRATOR_START",
+        lambda *args: starts.append(args) or {"status": "running"},
+    )
+
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
+    assert starts == []
+
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is True
+    assert len(starts) == 1
+
+
 def test_cloud_run_entrypoint_contract_is_explicit():
     source = Path(cloud_run_server.__file__).read_text(encoding="utf-8")
 
     assert "runtime_instance_guard.install(runtime_core)" in source
     assert "runtime_instance_guard.is_leader()" in source
+    assert "_start_standby_promotion" in source
+    assert "_promote_from_standby_once" in source
     assert "RuntimeLifecycle" in source
     assert 'os.environ.get("PORT", "8080")' in source
     assert '"/api/bot/start"' in source
