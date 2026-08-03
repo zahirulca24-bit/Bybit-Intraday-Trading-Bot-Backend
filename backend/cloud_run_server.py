@@ -6,6 +6,7 @@ This wrapper preserves the existing secure runtime while adding:
 - PostgreSQL advisory-lock single-leader ownership for automatic workers;
 - fail-closed checks on order-capable mutation routes;
 - periodic leader-connection verification inside the worker scheduler;
+- standby-to-leader promotion after deployment overlap ends;
 - SIGTERM/SIGINT graceful shutdown and advisory-lock release.
 """
 
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
+import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -52,6 +55,8 @@ _EXECUTION_MUTATION_PATHS = {
 _ORIGINAL_ORCHESTRATOR_START = secure_server.runtime_orchestrator.start
 _ORIGINAL_RUN_DUE_ONCE = secure_server.runtime_orchestrator.run_due_once
 _PATCHED = False
+_PROMOTION_LOCK = threading.RLock()
+_PROMOTION_THREAD: threading.Thread | None = None
 
 
 def _leadership_reason() -> str:
@@ -69,6 +74,70 @@ def _disable_execution(reason: str) -> None:
         })
 
 
+def _shutdown_started(runtime_core: Any) -> bool:
+    reader = getattr(runtime_core, "runtime_lifecycle_status", None)
+    if not callable(reader):
+        return False
+    try:
+        return bool((reader() or {}).get("shutdownStarted"))
+    except Exception:
+        return False
+
+
+def _promote_from_standby_once(
+    runtime_core: Any,
+    symbol_worker: Any,
+    setup_worker: Any,
+    execution_handoff: Any | None = None,
+) -> bool:
+    """Retry the existing advisory lock and start workers exactly once on promotion."""
+    leadership = runtime_instance_guard.acquire(runtime_core)
+    if not leadership.get("leader"):
+        _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
+        return False
+    _ORIGINAL_ORCHESTRATOR_START(
+        runtime_core,
+        symbol_worker,
+        setup_worker,
+        execution_handoff,
+    )
+    return True
+
+
+def _start_standby_promotion(
+    runtime_core: Any,
+    symbol_worker: Any,
+    setup_worker: Any,
+    execution_handoff: Any | None = None,
+) -> None:
+    """Use the existing orchestrator idle cadence to recover after revision overlap."""
+    global _PROMOTION_THREAD
+    with _PROMOTION_LOCK:
+        if _PROMOTION_THREAD is not None and _PROMOTION_THREAD.is_alive():
+            return
+        interval = int(
+            secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1
+        )
+
+        def monitor() -> None:
+            while not _shutdown_started(runtime_core):
+                if _promote_from_standby_once(
+                    runtime_core,
+                    symbol_worker,
+                    setup_worker,
+                    execution_handoff,
+                ):
+                    return
+                time.sleep(interval)
+
+        _PROMOTION_THREAD = threading.Thread(
+            target=monitor,
+            name="runtime-leader-promotion",
+            daemon=True,
+        )
+        _PROMOTION_THREAD.start()
+
+
 def _install_orchestrator_guard() -> None:
     """Acquire leadership only after durable PostgreSQL state is installed."""
 
@@ -81,6 +150,12 @@ def _install_orchestrator_guard() -> None:
         leadership = runtime_instance_guard.install(runtime_core)
         if not leadership.get("leader"):
             _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
+            _start_standby_promotion(
+                runtime_core,
+                symbol_worker,
+                setup_worker,
+                execution_handoff,
+            )
             return {
                 "status": "standby",
                 "threadAlive": False,
