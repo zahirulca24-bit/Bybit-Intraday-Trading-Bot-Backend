@@ -149,6 +149,19 @@ def _load_persisted() -> None:
         )
 
 
+def _refresh_store(core: Any) -> bool:
+    """Bind a newly healthy durable store after startup degradation recovers."""
+    global _STORE
+    candidate = _persistent_store(core)
+    if candidate is None:
+        return False
+    if candidate is _STORE:
+        return True
+    _STORE = candidate
+    _load_persisted()
+    return True
+
+
 def _persist(payload: dict[str, Any]) -> bool:
     if _STORE is None:
         return False
@@ -188,8 +201,6 @@ def _closed_history(
 
 
 def _rank_key(row: dict[str, Any]) -> tuple[float, float, float, str]:
-    # The weaker timeframe controls the primary score. Liquidity and spread are
-    # only deterministic tie-breakers, preserving trend as the selection basis.
     trend_score = float(row.get("trendScore") or 0)
     turnover = float(row.get("turnover24h") or 0)
     spread = float(row.get("spreadPct") or 0)
@@ -207,6 +218,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
         if _BASE_FETCH is None or _TREND_CLASSIFIER is None:
             raise RuntimeError("Daily universe is not installed with worker dependencies")
 
+        _refresh_store(core)
         cfg = settings()
         symbols, tickers = _BASE_FETCH(core)
         minimum = int(cfg["minimumClosedCandles"])
@@ -310,6 +322,7 @@ def due(now: int | None = None) -> bool:
 
 
 def ensure_current(core: Any, now: int | None = None) -> dict[str, Any]:
+    _refresh_store(core)
     return build(core, now=now) if due(now) else snapshot()
 
 
@@ -335,6 +348,7 @@ def install(core: Any, worker_module: Any) -> dict[str, Any]:
     """Install the daily source without deleting or rewriting worker logic."""
     global _BASE_FETCH, _TREND_CLASSIFIER, _STORE
     if getattr(worker_module, "_daily_universe_v1_installed", False):
+        _refresh_store(core)
         return status(worker_module)
 
     base_fetch = getattr(worker_module, "_fetch_active_usdt_symbols", None)
