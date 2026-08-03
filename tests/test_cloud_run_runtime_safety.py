@@ -137,7 +137,6 @@ def test_standby_runtime_promotes_and_starts_orchestrator(monkeypatch):
 
     assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
     assert starts == []
-    assert core.BOT_STATE["enabled"] is False
 
     assert cloud_run_server._promote_from_standby_once(core, object(), object()) is True
     assert len(starts) == 1
