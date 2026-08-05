@@ -7,6 +7,8 @@ const TRANSITIONS = new Map([
   ['CLOSING', new Set(['CLOSED', 'FAILED'])],
 ]);
 
+const LEADER_LOCK_ID = 21010;
+const CLAIM_LOCK_ID = 21012;
 function nowSeconds() { return Math.floor(Date.now() / 1000); }
 function managementKey(candidateKey) { return `node_trade_management:${candidateKey}`; }
 
@@ -14,21 +16,34 @@ export class ExecutionRepository {
   constructor(pool) { this.pool = pool; this.leaderClient = null; }
 
   async acquireLeadership() {
-    if (this.leaderClient) return true;
+    if (this.leaderClient && await this.verifyLeadership()) return true;
     const client = await this.pool.connect();
     try {
-      const result = await client.query('SELECT pg_try_advisory_lock($1) AS leader', [21010]);
+      const result = await client.query('SELECT pg_try_advisory_lock($1) AS leader', [LEADER_LOCK_ID]);
       if (result.rows[0]?.leader !== true) { client.release(); return false; }
       this.leaderClient = client;
       return true;
     } catch (error) { client.release(); throw error; }
   }
 
+  async verifyLeadership() {
+    const client = this.leaderClient;
+    if (!client) return false;
+    try {
+      await client.query('SELECT 1 AS alive');
+      return true;
+    } catch (_error) {
+      this.leaderClient = null;
+      try { client.release(true); } catch (_) { try { client.release(); } catch (_) {} }
+      return false;
+    }
+  }
+
   async releaseLeadership() {
     const client = this.leaderClient;
     this.leaderClient = null;
     if (!client) return;
-    try { await client.query('SELECT pg_advisory_unlock($1)', [21010]); } finally { client.release(); }
+    try { await client.query('SELECT pg_advisory_unlock($1)', [LEADER_LOCK_ID]); } finally { client.release(); }
   }
 
   async ping() {
@@ -37,11 +52,42 @@ export class ExecutionRepository {
     return { ok: Number(row.version) >= 5 && row.table_name === 'execution_commands', migrationVersion: Number(row.version || 0) };
   }
 
+  async adoptActiveCommands(ownerBase) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1)', [CLAIM_LOCK_ID]);
+      const result = await client.query('SELECT * FROM execution_commands WHERE state = ANY($1::text[]) ORDER BY created_at,candidate_key FOR UPDATE', [ACTIVE]);
+      if (result.rowCount > 3) throw new Error('More than three active execution commands exist; ownership recovery blocked');
+
+      const used = new Set();
+      const assignments = [];
+      for (const row of result.rows) {
+        let slotId = Number(row.slot_id || 0);
+        if (![1, 2, 3].includes(slotId) || used.has(slotId)) {
+          slotId = [1, 2, 3].find((candidate) => !used.has(candidate));
+        }
+        if (!slotId) throw new Error('Unable to assign a unique execution slot');
+        used.add(slotId);
+        const ownerId = `${ownerBase}:slot${slotId}`;
+        const updated = await client.query('UPDATE execution_commands SET slot_id=$1,owner_id=$2,updated_at=$3 WHERE candidate_key=$4 AND state = ANY($5::text[]) RETURNING *', [slotId, ownerId, nowSeconds(), row.candidate_key, ACTIVE]);
+        if (!updated.rowCount) throw new Error(`Lost active command during ownership recovery: ${row.candidate_key}`);
+        assignments.push(normalize(updated.rows[0]));
+      }
+      await client.query('COMMIT');
+      return assignments;
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw error;
+    } finally { client.release(); }
+  }
+
   async claim(ownerId, slotId) {
     if (![1,2,3].includes(slotId)) throw new Error('slotId must be 1, 2, or 3');
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
+      await client.query('SELECT pg_advisory_xact_lock($1)', [CLAIM_LOCK_ID]);
       const occupied = await client.query('SELECT 1 FROM execution_commands WHERE slot_id=$1 AND state = ANY($2::text[]) LIMIT 1', [slotId, ACTIVE]);
       if (occupied.rowCount) { await client.query('COMMIT'); return null; }
       const active = await client.query('SELECT COUNT(*)::int AS count FROM execution_commands WHERE state = ANY($1::text[])', [ACTIVE]);
@@ -67,8 +113,8 @@ export class ExecutionRepository {
   async transition(command, nextState) {
     const expected = String(command.state);
     if (!TRANSITIONS.get(expected)?.has(nextState)) throw new Error(`Invalid transition ${expected}->${nextState}`);
-    const result = await this.pool.query('UPDATE execution_commands SET state=$1,updated_at=$2 WHERE candidate_key=$3 AND owner_id=$4 AND state=$5 RETURNING *', [nextState, nowSeconds(), command.candidateKey, command.ownerId, expected]);
-    if (!result.rowCount) throw new Error('Execution command transition lost ownership or state changed');
+    const result = await this.pool.query('UPDATE execution_commands SET state=$1,updated_at=$2 WHERE candidate_key=$3 AND owner_id=$4 AND slot_id=$5 AND state=$6 RETURNING *', [nextState, nowSeconds(), command.candidateKey, command.ownerId, command.slotId, expected]);
+    if (!result.rowCount) throw new Error('Execution command transition lost ownership, slot, or state changed');
     return normalize(result.rows[0]);
   }
 

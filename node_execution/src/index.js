@@ -59,6 +59,13 @@ async function slotLoop(slotId) {
   while (!stopping && runtime.leader) {
     let command = null;
     try {
+      if (!await repository.verifyLeadership()) {
+        runtime.leader = false;
+        runtime.ready = false;
+        runtime.lastError = 'Node execution leader database session was lost; all slots stopped.';
+        setSlot(slotId, 'LEADERSHIP_LOST');
+        break;
+      }
       command = await repository.ownedActiveCommand(ownerId, slotId);
       if (!command) command = await repository.claim(ownerId, slotId);
       if (!command) {
@@ -85,7 +92,7 @@ async function coordinator() {
     console.log(JSON.stringify({ level: 'warn', event: 'execution_disabled' }));
     return;
   }
-  while (!stopping && !workersStarted) {
+  while (!stopping) {
     try {
       const database = await repository.ping();
       runtime.databaseReady = database.ok;
@@ -93,20 +100,34 @@ async function coordinator() {
       if (!database.ok) throw new Error('PostgreSQL migration v5 execution contract is unavailable');
       runtime.leader = await repository.acquireLeadership();
       if (!runtime.leader) {
+        runtime.ready = false;
         runtime.lastError = 'Another Node execution instance owns the PostgreSQL leader lock.';
         await sleep(config.pollMs);
         continue;
       }
+
+      const adopted = await repository.adoptActiveCommands(config.ownerId);
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      console.log(JSON.stringify({ level: 'info', event: 'execution_management_leader_ready', ownerId: config.ownerId }));
+      console.log(JSON.stringify({ level: 'info', event: 'execution_management_leader_ready', ownerId: config.ownerId, adoptedCommands: adopted.length }));
       await Promise.all([1, 2, 3].map(slotLoop));
-    } catch (error) {
+
+      workersStarted = false;
       runtime.ready = false;
+      runtime.leader = false;
+      if (!stopping) {
+        await repository.releaseLeadership().catch(() => undefined);
+        await sleep(config.pollMs);
+      }
+    } catch (error) {
+      workersStarted = false;
+      runtime.ready = false;
+      runtime.leader = false;
       runtime.lastError = error.message;
+      await repository.releaseLeadership().catch(() => undefined);
       console.error(JSON.stringify({ level: 'error', event: 'coordinator_error', message: error.message }));
-      await sleep(config.pollMs);
+      if (!stopping) await sleep(config.pollMs);
     }
   }
 }
@@ -114,7 +135,10 @@ async function coordinator() {
 async function shutdown(signal) {
   if (stopping) return;
   stopping = true;
+  workersStarted = false;
   runtime.ready = false;
+  runtime.leader = false;
+  for (const slotId of [1, 2, 3]) setSlot(slotId, 'STOPPING', runtime.slots[slotId]?.candidateKey || null);
   console.log(JSON.stringify({ level: 'info', event: 'shutdown', signal }));
   await repository.releaseLeadership().catch(() => undefined);
   await pool.end().catch(() => undefined);
@@ -124,6 +148,7 @@ async function shutdown(signal) {
 for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => shutdown(signal).finally(() => process.exit(0)));
 process.on('unhandledRejection', (error) => {
   runtime.ready = false;
+  runtime.leader = false;
   runtime.lastError = error?.message || String(error);
   console.error(JSON.stringify({ level: 'fatal', event: 'unhandled_rejection', message: runtime.lastError }));
 });
