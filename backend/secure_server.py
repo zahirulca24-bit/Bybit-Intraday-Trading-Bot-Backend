@@ -16,7 +16,7 @@ try:
     from . import live_execution_ledger
     from . import position_synced_server as verified
     from . import replay_collector, replay_engine, replay_performance_journal
-    from . import replay_safety, replay_sessions
+    from . import replay_safety, replay_sessions, replay_visualization
     from . import runtime_orchestrator, setup_worker, worker
     from .durable_runtime import install as install_durable_runtime
     from .intraday_scanner import (
@@ -50,6 +50,7 @@ except ImportError:
     import replay_performance_journal
     import replay_safety
     import replay_sessions
+    import replay_visualization
     import runtime_orchestrator
     import setup_worker
     import worker
@@ -159,6 +160,8 @@ class SecurePositionSyncedHandler(verified.PositionSyncedHandler):
         if replay_collector.handle_get(self, core, path):
             return
         if replay_performance_journal.handle_get(self, core, path):
+            return
+        if replay_visualization.handle_get(self, core, path):
             return
         if replay_sessions.handle_get(self, core, path):
             return
@@ -280,6 +283,7 @@ def install_secure_runtime() -> None:
     replay_sessions.install(core)
     replay_engine.install(core)
     replay_performance_journal.install(core)
+    replay_visualization.install(core)
     with core.BOT_LOCK:
         core.BOT_STATE["maxOpenPositions"] = 3
     execution_idempotency.install(core, execution_handoff)
