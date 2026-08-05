@@ -7,6 +7,7 @@ This wrapper preserves the existing secure runtime while adding:
 - fail-closed checks on order-capable mutation routes;
 - periodic leader-connection verification inside the worker scheduler;
 - standby-to-leader promotion after deployment overlap ends;
+- shutdown-safe, exactly-once worker promotion;
 - SIGTERM/SIGINT graceful shutdown and advisory-lock release.
 """
 
@@ -20,11 +21,6 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-# The legacy backend contains a few absolute imports such as
-# ``from engines...`` even when loaded as the ``backend`` package.  Make both
-# the repository root and backend directory explicit before importing the
-# canonical patch chain.  This keeps CI, Cloud Run, and direct execution
-# deterministic without masking nested ImportError exceptions.
 _BACKEND_DIR = Path(__file__).resolve().parent
 _REPOSITORY_ROOT = _BACKEND_DIR.parent
 for _path in (str(_REPOSITORY_ROOT), str(_BACKEND_DIR)):
@@ -32,12 +28,7 @@ for _path in (str(_REPOSITORY_ROOT), str(_BACKEND_DIR)):
         sys.path.insert(0, _path)
 
 if __package__:
-    from . import (
-        deployment_readiness,
-        runtime_instance_guard,
-        runtime_lifecycle,
-        secure_server,
-    )
+    from . import deployment_readiness, runtime_instance_guard, runtime_lifecycle, secure_server
 else:
     import deployment_readiness
     import runtime_instance_guard
@@ -57,6 +48,7 @@ _ORIGINAL_RUN_DUE_ONCE = secure_server.runtime_orchestrator.run_due_once
 _PATCHED = False
 _PROMOTION_LOCK = threading.RLock()
 _PROMOTION_THREAD: threading.Thread | None = None
+_WORKERS_STARTED = False
 
 
 def _leadership_reason() -> str:
@@ -84,24 +76,66 @@ def _shutdown_started(runtime_core: Any) -> bool:
         return False
 
 
+def _start_workers_once(
+    runtime_core: Any,
+    symbol_worker: Any,
+    setup_worker: Any,
+    execution_handoff: Any | None = None,
+) -> bool:
+    """Start the worker orchestrator once, or release leadership on failure."""
+    global _WORKERS_STARTED
+    with _PROMOTION_LOCK:
+        if _WORKERS_STARTED:
+            return True
+        if _shutdown_started(runtime_core):
+            reason = "Runtime shutdown started before worker promotion completed."
+            runtime_instance_guard.release(runtime_core, reason)
+            _disable_execution(reason)
+            return False
+        try:
+            _ORIGINAL_ORCHESTRATOR_START(
+                runtime_core,
+                symbol_worker,
+                setup_worker,
+                execution_handoff,
+            )
+        except Exception as exc:
+            reason = f"Worker orchestrator failed to start after leadership acquisition: {exc}"
+            runtime_instance_guard.release(runtime_core, reason)
+            _disable_execution(reason)
+            return False
+        _WORKERS_STARTED = True
+        return True
+
+
 def _promote_from_standby_once(
     runtime_core: Any,
     symbol_worker: Any,
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> bool:
-    """Retry the existing advisory lock and start workers exactly once on promotion."""
-    leadership = runtime_instance_guard.acquire(runtime_core)
-    if not leadership.get("leader"):
-        _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
-        return False
-    _ORIGINAL_ORCHESTRATOR_START(
-        runtime_core,
-        symbol_worker,
-        setup_worker,
-        execution_handoff,
-    )
-    return True
+    """Retry the advisory lock and start workers exactly once on promotion."""
+    with _PROMOTION_LOCK:
+        if _shutdown_started(runtime_core):
+            _disable_execution("Runtime shutdown is in progress; promotion is blocked.")
+            return False
+        if _WORKERS_STARTED:
+            return True
+        leadership = runtime_instance_guard.acquire(runtime_core)
+        if not leadership.get("leader"):
+            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
+            return False
+        if _shutdown_started(runtime_core):
+            reason = "Runtime shutdown started after leadership acquisition; promotion was cancelled."
+            runtime_instance_guard.release(runtime_core, reason)
+            _disable_execution(reason)
+            return False
+        return _start_workers_once(
+            runtime_core,
+            symbol_worker,
+            setup_worker,
+            execution_handoff,
+        )
 
 
 def _start_standby_promotion(
@@ -110,14 +144,12 @@ def _start_standby_promotion(
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> None:
-    """Use the existing orchestrator idle cadence to recover after revision overlap."""
+    """Use the orchestrator idle cadence to recover after revision overlap."""
     global _PROMOTION_THREAD
     with _PROMOTION_LOCK:
         if _PROMOTION_THREAD is not None and _PROMOTION_THREAD.is_alive():
             return
-        interval = int(
-            secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1
-        )
+        interval = max(1, int(secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1))
 
         def monitor() -> None:
             while not _shutdown_started(runtime_core):
@@ -150,23 +182,17 @@ def _install_orchestrator_guard() -> None:
         leadership = runtime_instance_guard.install(runtime_core)
         if not leadership.get("leader"):
             _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
-            _start_standby_promotion(
-                runtime_core,
-                symbol_worker,
-                setup_worker,
-                execution_handoff,
-            )
+            _start_standby_promotion(runtime_core, symbol_worker, setup_worker, execution_handoff)
+            return {"status": "standby", "threadAlive": False, "runtimeLeadership": leadership}
+        started = _start_workers_once(runtime_core, symbol_worker, setup_worker, execution_handoff)
+        if not started:
             return {
-                "status": "standby",
+                "status": "blocked",
                 "threadAlive": False,
-                "runtimeLeadership": leadership,
+                "lastError": _leadership_reason(),
+                "runtimeLeadership": runtime_instance_guard.snapshot(),
             }
-        return _ORIGINAL_ORCHESTRATOR_START(
-            runtime_core,
-            symbol_worker,
-            setup_worker,
-            execution_handoff,
-        )
+        return secure_server.runtime_orchestrator.snapshot()
 
     def guarded_run_due_once(
         runtime_core: Any,
@@ -238,9 +264,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
             return
         if path == "/readyz":
             readiness = deployment_readiness.runtime_readiness(
-                core,
-                runtime_instance_guard,
-                secure_server.runtime_orchestrator,
+                core, runtime_instance_guard, secure_server.runtime_orchestrator
             )
             core.json_response(self, 200 if readiness.get("ok") else 503, readiness)
             return
@@ -287,10 +311,7 @@ def run() -> None:
     host = os.environ.get("HOST", "0.0.0.0")
     server = ThreadingHTTPServer((host, port), CloudRunSecureHandler)
     lifecycle = runtime_lifecycle.RuntimeLifecycle(
-        core,
-        server,
-        secure_server.runtime_orchestrator,
-        runtime_instance_guard,
+        core, server, secure_server.runtime_orchestrator, runtime_instance_guard
     )
     core.runtime_lifecycle_status = lifecycle.snapshot
     lifecycle.install_signal_handlers()

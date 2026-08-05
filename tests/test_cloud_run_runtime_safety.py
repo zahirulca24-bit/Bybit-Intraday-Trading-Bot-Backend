@@ -56,32 +56,34 @@ class Store:
         return self.connection
 
 
-def core_for(connection):
+def core_for(connection, *, shutdown=False):
     return SimpleNamespace(
         BOT_LOCK=threading.RLock(),
         BOT_STATE={"enabled": True},
         _durable_state_store=Store(connection),
+        runtime_lifecycle_status=lambda: {"shutdownStarted": shutdown},
     )
 
 
 def setup_function():
     runtime_instance_guard.release()
+    cloud_run_server._WORKERS_STARTED = False
+    cloud_run_server._PROMOTION_THREAD = None
 
 
 def teardown_function():
     runtime_instance_guard.release()
+    cloud_run_server._WORKERS_STARTED = False
+    cloud_run_server._PROMOTION_THREAD = None
 
 
 def test_postgres_leader_lock_is_retained_until_release():
     connection = Connection(granted=True)
     core = core_for(connection)
-
     status = runtime_instance_guard.install(core)
-
     assert status["leader"] is True
     assert connection.closed is False
     assert core.BOT_STATE["runtimeExecutionLeader"] is True
-
     released = runtime_instance_guard.release(core, "test complete")
     assert released["leader"] is False
     assert connection.unlocked is True
@@ -92,9 +94,7 @@ def test_postgres_leader_lock_is_retained_until_release():
 def test_follower_instance_is_fail_closed():
     connection = Connection(granted=False)
     core = core_for(connection)
-
     status = runtime_instance_guard.install(core)
-
     assert status["status"] == "standby"
     assert status["leader"] is False
     assert connection.closed is True
@@ -106,10 +106,8 @@ def test_lost_leader_connection_disables_execution():
     connection = Connection(granted=True)
     core = core_for(connection)
     runtime_instance_guard.install(core)
-
     connection.fail_health = True
     status = runtime_instance_guard.snapshot()
-
     assert status["status"] == "lost"
     assert status["leader"] is False
     assert core.BOT_STATE["enabled"] is False
@@ -123,32 +121,88 @@ def test_standby_runtime_promotes_and_starts_orchestrator(monkeypatch):
         {"leader": True, "reason": "lock acquired"},
     ))
     starts = []
+    monkeypatch.setattr(cloud_run_server.runtime_instance_guard, "acquire", lambda _core: next(states))
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_ORIGINAL_ORCHESTRATOR_START",
+        lambda *args: starts.append(args) or {"status": "running"},
+    )
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
+    assert starts == []
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is True
+    assert len(starts) == 1
 
+
+def test_concurrent_promotion_starts_workers_exactly_once(monkeypatch):
+    core = core_for(Connection(granted=True))
+    starts = []
     monkeypatch.setattr(
         cloud_run_server.runtime_instance_guard,
         "acquire",
-        lambda _core: next(states),
+        lambda _core: {"leader": True, "reason": "lock acquired"},
     )
     monkeypatch.setattr(
         cloud_run_server,
         "_ORIGINAL_ORCHESTRATOR_START",
         lambda *args: starts.append(args) or {"status": "running"},
     )
-
-    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
-    assert starts == []
-
-    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is True
+    threads = [
+        threading.Thread(
+            target=cloud_run_server._promote_from_standby_once,
+            args=(core, object(), object()),
+        )
+        for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
     assert len(starts) == 1
+    assert cloud_run_server._WORKERS_STARTED is True
+
+
+def test_shutdown_blocks_promotion_before_lock_acquisition(monkeypatch):
+    core = core_for(Connection(granted=True), shutdown=True)
+    acquired = []
+    monkeypatch.setattr(
+        cloud_run_server.runtime_instance_guard,
+        "acquire",
+        lambda _core: acquired.append(True) or {"leader": True},
+    )
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
+    assert acquired == []
+    assert core.BOT_STATE["enabled"] is False
+
+
+def test_worker_start_failure_releases_leadership(monkeypatch):
+    connection = Connection(granted=True)
+    core = core_for(connection)
+    runtime_instance_guard.install(core)
+    monkeypatch.setattr(
+        cloud_run_server.runtime_instance_guard,
+        "acquire",
+        lambda _core: {"leader": True, "reason": "lock acquired"},
+    )
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_ORIGINAL_ORCHESTRATOR_START",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("start failed")),
+    )
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is False
+    status = runtime_instance_guard.snapshot()
+    assert status["leader"] is False
+    assert status["status"] == "released"
+    assert connection.unlocked is True
+    assert core.BOT_STATE["enabled"] is False
 
 
 def test_cloud_run_entrypoint_contract_is_explicit():
     source = Path(cloud_run_server.__file__).read_text(encoding="utf-8")
-
     assert "runtime_instance_guard.install(runtime_core)" in source
     assert "runtime_instance_guard.is_leader()" in source
     assert "_start_standby_promotion" in source
     assert "_promote_from_standby_once" in source
+    assert "_start_workers_once" in source
     assert "RuntimeLifecycle" in source
     assert 'os.environ.get("PORT", "8080")' in source
     assert '"/api/bot/start"' in source
