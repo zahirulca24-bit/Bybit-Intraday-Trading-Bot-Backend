@@ -194,9 +194,19 @@ test('Cloud Run health server binds a port and readiness is fail-closed', async 
     const readiness = await fetch(`http://127.0.0.1:${port}/readyz`);
     assert.equal(health.status, 200);
     assert.equal(readiness.status, 503);
-    runtime.ready = true;
+
+    runtime.databaseReady = true;
+    runtime.migrationVersion = 5;
+    runtime.slots = {
+      1: { state: 'WAITING', candidateKey: null },
+      2: { state: 'WAITING', candidateKey: null },
+      3: { state: 'WAITING', candidateKey: null },
+    };
     const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
+    const payload = await ready.json();
     assert.equal(ready.status, 200);
+    assert.equal(payload.serviceReady, true);
+    assert.equal(payload.executionReady, false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
