@@ -56,9 +56,10 @@ def _leadership_reason() -> str:
     return str(status.get("reason") or "This instance is not the automatic-execution leader.")
 
 
-def _disable_execution(reason: str) -> None:
-    with core.BOT_LOCK:
-        core.BOT_STATE.update({
+def _disable_execution(reason: str, runtime_core: Any | None = None) -> None:
+    target_core = runtime_core or core
+    with target_core.BOT_LOCK:
+        target_core.BOT_STATE.update({
             "enabled": False,
             "runtimeExecutionLeader": False,
             "executionGuard": {"ok": False, "reason": reason},
@@ -90,7 +91,7 @@ def _start_workers_once(
         if _shutdown_started(runtime_core):
             reason = "Runtime shutdown started before worker promotion completed."
             runtime_instance_guard.release(runtime_core, reason)
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             return False
         try:
             _ORIGINAL_ORCHESTRATOR_START(
@@ -102,7 +103,7 @@ def _start_workers_once(
         except Exception as exc:
             reason = f"Worker orchestrator failed to start after leadership acquisition: {exc}"
             runtime_instance_guard.release(runtime_core, reason)
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             return False
         _WORKERS_STARTED = True
         return True
@@ -117,18 +118,18 @@ def _promote_from_standby_once(
     """Retry the advisory lock and start workers exactly once on promotion."""
     with _PROMOTION_LOCK:
         if _shutdown_started(runtime_core):
-            _disable_execution("Runtime shutdown is in progress; promotion is blocked.")
+            _disable_execution("Runtime shutdown is in progress; promotion is blocked.", runtime_core)
             return False
         if _WORKERS_STARTED:
             return True
         leadership = runtime_instance_guard.acquire(runtime_core)
         if not leadership.get("leader"):
-            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
+            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."), runtime_core)
             return False
         if _shutdown_started(runtime_core):
             reason = "Runtime shutdown started after leadership acquisition; promotion was cancelled."
             runtime_instance_guard.release(runtime_core, reason)
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             return False
         return _start_workers_once(
             runtime_core,
@@ -181,7 +182,7 @@ def _install_orchestrator_guard() -> None:
     ) -> dict[str, Any]:
         leadership = runtime_instance_guard.install(runtime_core)
         if not leadership.get("leader"):
-            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."))
+            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."), runtime_core)
             _start_standby_promotion(runtime_core, symbol_worker, setup_worker, execution_handoff)
             return {"status": "standby", "threadAlive": False, "runtimeLeadership": leadership}
         started = _start_workers_once(runtime_core, symbol_worker, setup_worker, execution_handoff)
@@ -203,7 +204,7 @@ def _install_orchestrator_guard() -> None:
     ) -> dict[str, Any]:
         if not runtime_instance_guard.is_leader():
             reason = _leadership_reason()
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             return {
                 "status": "standby",
                 "threadAlive": False,
@@ -232,7 +233,7 @@ def _install_start_gate() -> None:
     def guarded_start_bot(instance: Any, payload: dict[str, Any]):
         if not runtime_instance_guard.is_leader():
             reason = _leadership_reason()
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             core.json_response(instance, 503, {
                 "ok": False,
                 "enabled": False,
@@ -290,7 +291,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
                 core.json_response(self, 401, {"ok": False, "error": "Unauthorized"})
                 return
             reason = _leadership_reason()
-            _disable_execution(reason)
+            _disable_execution(reason, runtime_core)
             core.json_response(self, 503, {
                 "ok": False,
                 "enabled": False,
