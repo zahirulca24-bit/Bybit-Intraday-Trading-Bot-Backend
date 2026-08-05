@@ -5,6 +5,7 @@ import { ExecutionRepository } from './repository.js';
 import { CommandExecutor } from './executor.js';
 import { TradeManager } from './tradeManager.js';
 import { createHealthServer } from './httpServer.js';
+import { evaluateFirstTradeGate, assertFirstTradeCandidate } from './firstTradeGate.js';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const config = loadConfig();
@@ -16,6 +17,7 @@ const runtime = {
   migrationVersion: 0,
   startedAt: new Date().toISOString(),
   lastError: null,
+  firstTradeGate: { ok: false, armed: config.firstDemoTradeArmed, reasons: ['Preflight has not run.'] },
   slots: Object.fromEntries([1, 2, 3].map((slotId) => [slotId, { state: 'IDLE', candidateKey: null, updatedAt: null }])),
 };
 
@@ -27,7 +29,7 @@ const pool = new pg.Pool({
   max: 8,
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,
-  application_name: 'bybit-node-execution-step11',
+  application_name: 'bybit-node-execution-controlled-demo',
 });
 const repository = new ExecutionRepository(pool);
 const bybit = new BybitClient(config);
@@ -41,6 +43,7 @@ function setSlot(slotId, state, candidateKey = null) {
 }
 
 async function processCommand(command) {
+  if (command.state === 'RESERVED') assertFirstTradeCandidate(command, config);
   if (['RESERVED', 'ORDER_PENDING'].includes(command.state)) return executor.execute(command);
   if (['PARTIALLY_FILLED', 'MANAGING'].includes(command.state)) return manager.cycle(command);
   if (command.state === 'CLOSING') {
@@ -106,12 +109,24 @@ async function coordinator() {
         continue;
       }
 
+      runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config });
+      if (!runtime.firstTradeGate.ok) {
+        runtime.ready = false;
+        runtime.lastError = `First Demo trade gate blocked: ${runtime.firstTradeGate.reasons.join(' ')}`;
+        await repository.releaseLeadership().catch(() => undefined);
+        await sleep(config.pollMs);
+        continue;
+      }
+
       const adopted = await repository.adoptActiveCommands(config.ownerId);
+      if (adopted.length > config.maxActiveTrades) throw new Error('Controlled first-trade mode permits only one active command.');
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      console.log(JSON.stringify({ level: 'info', event: 'execution_management_leader_ready', ownerId: config.ownerId, adoptedCommands: adopted.length }));
-      await Promise.all([1, 2, 3].map(slotLoop));
+      setSlot(2, 'ARMED_STANDBY');
+      setSlot(3, 'ARMED_STANDBY');
+      console.log(JSON.stringify({ level: 'info', event: 'controlled_demo_execution_ready', ownerId: config.ownerId, riskPerTradePct: config.riskPerTradePct, maxActiveTrades: config.maxActiveTrades }));
+      await slotLoop(1);
 
       workersStarted = false;
       runtime.ready = false;
