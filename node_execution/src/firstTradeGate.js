@@ -2,6 +2,8 @@ function rows(response) {
   return Array.isArray(response?.result?.list) ? response.result.list : [];
 }
 
+const ACTIVE = ['RESERVED', 'ORDER_PENDING', 'PARTIALLY_FILLED', 'MANAGING', 'CLOSING'];
+
 export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   const reasons = [];
   if (config.baseUrl !== 'https://api-demo.bybit.com') reasons.push('Bybit endpoint is not Demo.');
@@ -10,14 +12,15 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   if (config.maxActiveTrades !== 1) reasons.push('FIRST_DEMO_MAX_ACTIVE_TRADES must equal 1.');
   if (config.riskPerTradePct !== 0.25) reasons.push('FIRST_DEMO_RISK_PER_TRADE_PCT must equal 0.25.');
 
-  const [positionsResponse, ordersResponse, activeCommands] = await Promise.all([
+  const [positionsResponse, ordersResponse, activeResult] = await Promise.all([
     bybit.positions(),
     bybit.activeOrders(),
-    repository.activeCommands(),
+    repository.pool.query('SELECT candidate_key,state FROM execution_commands WHERE state = ANY($1::text[]) ORDER BY created_at', [ACTIVE]),
   ]);
 
   const openPositions = rows(positionsResponse).filter((row) => Number(row.size || 0) > 0);
   const openOrders = rows(ordersResponse).filter((row) => !['Filled', 'Cancelled', 'Rejected', 'Deactivated', 'Expired'].includes(String(row.orderStatus || '')));
+  const activeCommands = activeResult.rows || [];
   if (openPositions.length) reasons.push(`Exchange has ${openPositions.length} open position(s).`);
   if (openOrders.length) reasons.push(`Exchange has ${openOrders.length} open order(s).`);
   if (activeCommands.length) reasons.push(`PostgreSQL has ${activeCommands.length} unresolved active command(s).`);
