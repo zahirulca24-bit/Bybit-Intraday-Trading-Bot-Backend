@@ -92,7 +92,14 @@ export class BybitClient {
   ticker(symbol) { return this.publicRequest('/v5/market/tickers', { category: 'linear', symbol }); }
   position(symbol) { return this.request('GET', '/v5/position/list', { category: 'linear', symbol }); }
   positions() { return this.request('GET', '/v5/position/list', { category: 'linear', settleCoin: 'USDT', limit: 200 }); }
-  activeOrders(symbol) { return this.request('GET', '/v5/order/realtime', { category: 'linear', symbol, openOnly: 0, limit: 50 }); }
+  activeOrders(symbol) {
+    return this.request('GET', '/v5/order/realtime', {
+      category: 'linear',
+      ...(symbol ? { symbol } : { settleCoin: 'USDT' }),
+      openOnly: 0,
+      limit: 50,
+    });
+  }
   realtimeOrder(symbol, orderLinkId) { return this.request('GET', '/v5/order/realtime', { category: 'linear', symbol, orderLinkId }); }
   orderHistory(symbol, orderLinkId) { return this.request('GET', '/v5/order/history', { category: 'linear', symbol, orderLinkId, limit: 20 }); }
   executions(symbol, orderLinkId) { return this.request('GET', '/v5/execution/list', { category: 'linear', symbol, orderLinkId, limit: 100 }); }
