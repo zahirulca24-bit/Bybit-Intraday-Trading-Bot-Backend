@@ -19,13 +19,20 @@ export function loadConfig(env = process.env) {
   if (!/^[A-Za-z0-9._:-]{3,80}$/.test(ownerId)) {
     throw new Error('NODE_EXECUTION_OWNER_ID must be a stable 3-80 character identifier');
   }
+  const enabled = String(env.NODE_EXECUTION_ENABLED || 'false').toLowerCase() === 'true';
+  const firstDemoTradeArmed = String(env.FIRST_DEMO_TRADE_ARMED || 'false').toLowerCase() === 'true';
+  const maxActiveTrades = Math.trunc(boundedNumber(env, 'FIRST_DEMO_MAX_ACTIVE_TRADES', 1, 1, 1));
+  const riskPerTradePct = boundedNumber(env, 'FIRST_DEMO_RISK_PER_TRADE_PCT', 0.25, 0.25, 0.25);
   return Object.freeze({
     databaseUrl: required(env, 'DATABASE_URL'),
     apiKey: required(env, 'BYBIT_API_KEY'),
     apiSecret: required(env, 'BYBIT_API_SECRET'),
     baseUrl,
     ownerId,
-    enabled: String(env.NODE_EXECUTION_ENABLED || 'false').toLowerCase() === 'true',
+    enabled,
+    firstDemoTradeArmed,
+    maxActiveTrades,
+    riskPerTradePct,
     port: Math.trunc(boundedNumber(env, 'PORT', 8080, 1, 65535)),
     pollMs: Math.trunc(boundedNumber(env, 'NODE_EXECUTION_POLL_MS', 3000, 500, 60000)),
     fillPollMs: Math.trunc(boundedNumber(env, 'NODE_FILL_POLL_MS', 1000, 250, 10000)),
