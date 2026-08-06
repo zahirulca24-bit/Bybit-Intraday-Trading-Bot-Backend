@@ -149,12 +149,21 @@ def build_universe(core: Any, force: bool = False, limit: int | None = None) -> 
         return dict(_CACHE)
     if not _UNIVERSE_LOCK.acquire(blocking=False):
         return dict(_CACHE)
+    started = time.monotonic()
     try:
         payload = core.public_bybit_get("/v5/market/tickers", {"category": "linear"})
         ticker_rows = (payload.get("result") or {}).get("list") or [] if payload.get("retCode") == 0 else []
         total = len(ticker_rows)
         liquid: list[dict] = []
-        counts = {"totalContracts": total, "validUsdt": 0, "spreadPassed": 0, "liquidityPassed": 0, "enriched": 0}
+        counts = {
+            "totalContracts": total,
+            "validUsdt": 0,
+            "spreadPassed": 0,
+            "liquidityPassed": 0,
+            "enriched": 0,
+            "enrichmentRejected": 0,
+            "deadlineExceeded": False,
+        }
         for item in ticker_rows:
             symbol = str(item.get("symbol") or "").upper()
             if not symbol.endswith("USDT") or not symbol.isalnum():
@@ -179,35 +188,72 @@ def build_universe(core: Any, force: bool = False, limit: int | None = None) -> 
 
         preliminary = sorted(liquid, key=lambda row: (row["turnover24h"], abs(row["changePct"])), reverse=True)[: int(cfg["shortlistSize"])]
         enriched: list[dict] = []
+        rejected: list[dict] = []
         for row in preliminary:
-            atr_pct, volume_ratio = _atr_volume(core, row["symbol"])
+            if time.monotonic() - started >= float(cfg["deadlineSeconds"]):
+                counts["deadlineExceeded"] = True
+                rejected.extend(
+                    {"symbol": pending["symbol"], "reason": "scan_deadline_exceeded"}
+                    for pending in preliminary[len(enriched) + len(rejected):]
+                )
+                break
+            try:
+                atr_pct, volume_ratio = _atr_volume(core, row["symbol"])
+            except Exception:
+                rejected.append({"symbol": row["symbol"], "reason": "market_history_error"})
+                continue
             row["atr15mPct"] = round(atr_pct, 5) if atr_pct is not None else None
             row["volumeRatio"] = round(volume_ratio, 4) if volume_ratio is not None else None
-            if atr_pct is None or volume_ratio is None:
+            if atr_pct is None:
+                rejected.append({"symbol": row["symbol"], "reason": "insufficient_closed_history"})
                 continue
-            if not float(cfg["minimumAtrPct"]) <= atr_pct <= float(cfg["maximumAtrPct"]):
+            if atr_pct < float(cfg["minimumAtrPct"]):
+                rejected.append({"symbol": row["symbol"], "reason": "atr_below_minimum"})
                 continue
-            if volume_ratio < float(cfg["minimumVolumeRatio"]):
+            if atr_pct > float(cfg["maximumAtrPct"]):
+                rejected.append({"symbol": row["symbol"], "reason": "atr_above_maximum"})
                 continue
+            row["volumeConfirmed"] = bool(
+                volume_ratio is not None and volume_ratio >= float(cfg["minimumVolumeRatio"])
+            )
             row["costTier"] = spread_tier(row["spreadPct"], cfg)
             enriched.append(row)
+
         counts["enriched"] = len(enriched)
+        counts["enrichmentRejected"] = len(rejected)
         ranked = _score(enriched)
         selected_limit = min(int(limit or cfg["deepScanSize"]), int(cfg["deepScanSize"]))
         selected = ranked[:selected_limit]
+        metrics = {
+            **counts,
+            "shortlisted": len(preliminary),
+            "deepScan": len(selected),
+            "rejected": len(rejected),
+        }
         if selected:
             _CACHE.update({
                 "symbols": [row["symbol"] for row in selected],
                 "rows": selected,
                 "shortlist": ranked[: int(cfg["shortlistSize"])],
+                "rejections": rejected,
                 "updatedAt": now,
                 "nextRefreshAt": now + int(cfg["refreshSeconds"]),
                 "source": "liquid_intraday_top_movers",
-                "metrics": {**counts, "shortlisted": len(preliminary), "deepScan": len(selected)},
+                "metrics": metrics,
                 "policy": cfg,
             })
         else:
-            _CACHE.update({"updatedAt": now, "nextRefreshAt": now + 60, "metrics": counts, "policy": cfg})
+            _CACHE.update({
+                "symbols": [],
+                "rows": [],
+                "shortlist": [],
+                "rejections": rejected,
+                "updatedAt": now,
+                "nextRefreshAt": now + 60,
+                "source": "liquid_intraday_top_movers_empty",
+                "metrics": metrics,
+                "policy": cfg,
+            })
         return dict(_CACHE)
     finally:
         _UNIVERSE_LOCK.release()

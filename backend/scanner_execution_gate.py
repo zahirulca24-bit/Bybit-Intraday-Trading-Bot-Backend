@@ -35,22 +35,43 @@ def _atr_volume_with_closed_history(core: Any, symbol: str):
 
 
 def closed_market_snapshot(core: Any, engine: Any, symbol: str, interval: str) -> dict:
-    """Build the modular engine snapshot exclusively from fully closed candles."""
+    """Build the modular engine snapshot exclusively from fully closed candles.
+
+    The strategy contract always receives distinct 1H, 15M and 5M histories.
+    The configured entry interval controls signal identity only; it must never be
+    aliased into the canonical 5M confirmation slot.
+    """
     entry_interval = guarded.normalize_interval(interval)
     engine.set_status("marketData", "running")
     tf1h, message1h = core.fetch_candles(symbol, "60")
     tf15m, message15m = core.fetch_candles(symbol, "15")
-    entry_tf, message_entry = core.fetch_candles(symbol, entry_interval)
-    ok = bool(tf1h and tf15m and entry_tf)
+    tf5m, message5m = core.fetch_candles(symbol, "5")
+
+    if entry_interval == "60":
+        entry_tf = tf1h
+        message_entry = message1h
+    elif entry_interval == "15":
+        entry_tf = tf15m
+        message_entry = message15m
+    elif entry_interval == "5":
+        entry_tf = tf5m
+        message_entry = message5m
+    else:
+        entry_tf, message_entry = core.fetch_candles(symbol, entry_interval)
+
+    ok = bool(tf1h and tf15m and tf5m and entry_tf)
     engine.set_status("marketData", "ok" if ok else "error")
     candle_time = int(entry_tf[-1]["time"]) if entry_tf else None
     _SNAPSHOT_CONTEXT.candle_time = candle_time
-    # Guarded execution reads this thread-local value to build the unique signal key.
     guarded._SCAN_CONTEXT.candle_time = candle_time
     return {
         "ok": ok,
-        "timeframes": {"1H": tf1h, "15M": tf15m, "5M": entry_tf},
-        "message": "; ".join(x for x in [message1h, message15m, message_entry] if x),
+        "timeframes": {"1H": tf1h, "15M": tf15m, "5M": tf5m},
+        "message": "; ".join(
+            dict.fromkeys(
+                x for x in [message1h, message15m, message5m, message_entry] if x
+            )
+        ),
         "entryInterval": entry_interval,
         "signalCandleTime": candle_time,
     }
@@ -75,10 +96,6 @@ def install(core: Any) -> None:
     original_evaluate_signal = core.evaluate_signal
     original_risk_check = engine.risk_check
 
-    # BotEngineV2.evaluate calls engine.market_data.snapshot directly. The older
-    # guard patched engine.market_snapshot, which is unused by the modular engine.
-    # Wire the real snapshot method so strategies and signal identity use the same
-    # fully closed entry candle.
     def modular_closed_snapshot(symbol):
         interval = getattr(guarded._SCAN_CONTEXT, "interval", "5")
         return closed_market_snapshot(core, engine, symbol, interval)
@@ -106,15 +123,11 @@ def install(core: Any) -> None:
         symbol = str(state.get("symbol") or "").upper()
         eligible = set(universe.get("symbols") or [])
         if symbol not in eligible:
-            # If the cached universe didn't include the signalled symbol, attempt
-            # a targeted refresh and re-check. This avoids forcing a rebuild on
-            # every order attempt while allowing freshly-signalled symbols to
-            # pass the execution-time gate.
             try:
                 fresh = intraday_scanner.build_universe(core, force=True)
+                universe = fresh
                 eligible = set(fresh.get("symbols") or [])
             except Exception:
-                # Preserve original blocking behavior when refresh fails.
                 pass
         if symbol not in eligible:
             engine.set_status("risk", "blocked")
