@@ -40,15 +40,13 @@ def filter_symbols(values: Iterable[object]) -> tuple[list[str], list[str]]:
 def filter_universe(universe: Any) -> dict:
     payload = dict(universe) if isinstance(universe, dict) else {}
     blocked = excluded_symbols()
+    original_symbols = [str(symbol or "").upper() for symbol in payload.get("symbols") or []]
+    removed_symbols = list(dict.fromkeys(symbol for symbol in original_symbols if symbol in blocked))
 
     def allowed(row: Any) -> bool:
         return isinstance(row, dict) and str(row.get("symbol") or "").upper() not in blocked
 
-    symbols = [
-        str(symbol).upper()
-        for symbol in payload.get("symbols") or []
-        if str(symbol or "").upper() not in blocked
-    ]
+    symbols = [symbol for symbol in original_symbols if symbol not in blocked]
     rows = [dict(row) for row in payload.get("rows") or [] if allowed(row)]
     shortlist = [dict(row) for row in payload.get("shortlist") or [] if allowed(row)]
 
@@ -57,9 +55,9 @@ def filter_universe(universe: Any) -> dict:
     if "shortlist" in payload:
         payload["shortlist"] = shortlist
     metrics = dict(payload.get("metrics") or {})
-    metrics["agreementRequiredExcluded"] = len(blocked)
+    metrics["agreementRequiredExcluded"] = len(removed_symbols)
     payload["metrics"] = metrics
-    payload["agreementRequiredExcludedSymbols"] = sorted(blocked)
+    payload["agreementRequiredExcludedSymbols"] = removed_symbols
     return payload
 
 
