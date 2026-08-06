@@ -214,19 +214,21 @@ def _start_standby_promotion(
         if _PROMOTION_THREAD is not None and _PROMOTION_THREAD.is_alive():
             return
 
-        base_delay = max(
-            1.0,
-            float(
-                os.environ.get(
-                    "RUNTIME_LEADER_RECOVERY_BASE_SECONDS",
-                    secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1,
-                )
-            ),
-        )
-        max_delay = max(
-            base_delay,
-            float(os.environ.get("RUNTIME_LEADER_RECOVERY_MAX_SECONDS", "30")),
-        )
+        _base_default = secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1
+        try:
+            base_delay = max(
+                1.0,
+                float(os.environ.get("RUNTIME_LEADER_RECOVERY_BASE_SECONDS", _base_default)),
+            )
+        except (ValueError, TypeError):
+            base_delay = max(1.0, float(_base_default))
+        try:
+            max_delay = max(
+                base_delay,
+                float(os.environ.get("RUNTIME_LEADER_RECOVERY_MAX_SECONDS", "30")),
+            )
+        except (ValueError, TypeError):
+            max_delay = max(base_delay, 30.0)
         _RECOVERY_STATE.update({
             "status": "recovering",
             "attempts": 0,
