@@ -56,7 +56,8 @@ def reset_state():
                 "executionRuns": 0,
                 "legacySetupWorkerDisabled": True,
                 "legacyPythonExecutionDisabled": True,
-                "lastError": None,
+                "lastErrorCode": None,
+                "lastErrorMessage": None,
                 "backoffActive": False,
                 "consecutiveFailureCount": 0,
                 "currentRetryDelaySeconds": 0,
@@ -240,14 +241,16 @@ def test_first_failure_schedules_five_second_retry(monkeypatch):
     assert state["nextRetryAt"] == 1005
     assert state["lastFailureAt"] == 1000
     assert state["lastFailureCategory"] == "database"
+    assert state["lastErrorCode"] == "WORKER_DATABASE_FAILURE"
+    assert state["lastErrorMessage"] == "Database operation failed."
 
 
-def test_repeated_failures_increase_delay_exponentially(monkeypatch):
+def test_repeated_failures_follow_exact_bounded_sequence(monkeypatch):
     reset_state()
     symbol = StubSymbolWorker()
     setup = StubSetupWorker()
-    times = [1000, 1005, 1015, 1035, 1075]
-    expected_delays = [5, 10, 20, 40, 80]
+    times = [1000, 1005, 1015, 1035, 1075, 1155, 1315, 1615]
+    expected_delays = [5, 10, 20, 40, 80, 160, 300, 300]
 
     def fail(*_args, **_kwargs):
         raise RuntimeError("Bybit API timeout")
@@ -260,6 +263,11 @@ def test_repeated_failures_increase_delay_exponentially(monkeypatch):
         assert state["currentRetryDelaySeconds"] == expected_delays[index]
         assert state["nextRetryAt"] == timestamp + expected_delays[index]
         assert state["lastFailureCategory"] == "exchange/API"
+        assert state["lastErrorCode"] == "WORKER_EXCHANGE_API_FAILURE"
+        assert (
+            state["lastErrorMessage"]
+            == "Exchange or external API operation failed."
+        )
 
 
 def test_retry_delay_never_exceeds_three_hundred_seconds(monkeypatch):
@@ -308,6 +316,8 @@ def test_pipeline_does_not_rerun_before_next_retry_at(monkeypatch):
     assert paused["nextRetryAt"] == 1005
     assert paused["consecutiveFailureCount"] == 1
     assert failed["lastFailureCategory"] == "validation"
+    assert failed["lastErrorCode"] == "WORKER_VALIDATION_FAILURE"
+    assert failed["lastErrorMessage"] == "Runtime validation failed."
 
 
 def test_successful_run_resets_failure_state(monkeypatch):
@@ -358,7 +368,8 @@ def test_successful_run_resets_failure_state(monkeypatch):
     assert state["nextRetryAt"] == 0
     assert state["lastFailureAt"] == 0
     assert state["lastFailureCategory"] is None
-    assert state["lastError"] is None
+    assert state["lastErrorCode"] is None
+    assert state["lastErrorMessage"] is None
 
 
 def test_runtime_snapshot_reports_backoff_state(monkeypatch):
@@ -380,5 +391,61 @@ def test_runtime_snapshot_reports_backoff_state(monkeypatch):
     assert snapshot["currentRetryDelaySeconds"] == 5
     assert snapshot["nextRetryAt"] == 1005
     assert snapshot["lastFailureCategory"] == "database"
+    assert snapshot["lastErrorCode"] == "WORKER_DATABASE_FAILURE"
+    assert snapshot["lastErrorMessage"] == "Database operation failed."
     assert snapshot["legacySetupWorkerDisabled"] is True
     assert snapshot["legacyPythonExecutionDisabled"] is True
+
+
+def test_runtime_snapshot_never_exposes_secret_bearing_exception(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+    raw_secret = (
+        "Authorization: Bearer secret-token password=my-password "
+        "postgresql://user:pass@host/database api_key=secret-key "
+        "token=secret-token Cookie: session=secret-value"
+    )
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError(raw_secret)
+
+    monkeypatch.setattr(orchestrator, "_run_fifteen_minute_strategy_classifier", fail)
+    snapshot = orchestrator.run_due_once(object(), symbol, setup, now=1000)
+
+    serialized = repr(snapshot)
+    assert "secret-token" not in serialized
+    assert "my-password" not in serialized
+    assert "user:pass@host" not in serialized
+    assert "secret-key" not in serialized
+    assert "session=secret-value" not in serialized
+    assert "Authorization: Bearer" not in serialized
+    assert snapshot["lastErrorCode"] == "WORKER_DATABASE_FAILURE"
+    assert snapshot["lastErrorMessage"] == "Database operation failed."
+    assert snapshot["lastFailureCategory"] == "database"
+    assert "lastError" not in snapshot
+
+
+def test_exception_summary_redacts_sensitive_values():
+    message = (
+        "Authorization: Bearer secret-token "
+        "password=my-password "
+        "postgresql://user:pass@host/database "
+        "api_key=secret-key "
+        "token=secret-token "
+        "Cookie: session=secret-value"
+    )
+
+    sanitized = orchestrator._sanitize_exception_summary(RuntimeError(message))
+
+    assert "secret-token" not in sanitized
+    assert "my-password" not in sanitized
+    assert "user:pass@host" not in sanitized
+    assert "secret-key" not in sanitized
+    assert "session=secret-value" not in sanitized
+    assert "Bearer [REDACTED]" in sanitized
+    assert "password=[REDACTED]" in sanitized
+    assert "postgresql://[REDACTED]:[REDACTED]@host/database" in sanitized
+    assert "api_key=[REDACTED]" in sanitized
+    assert "token=[REDACTED]" in sanitized
+    assert "Cookie: [REDACTED]" in sanitized
