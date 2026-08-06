@@ -65,16 +65,28 @@ def core_for(connection, *, shutdown=False):
     )
 
 
-def setup_function():
-    runtime_instance_guard.release()
+def _reset_cloud_run_state():
     cloud_run_server._WORKERS_STARTED = False
     cloud_run_server._PROMOTION_THREAD = None
+    cloud_run_server._PROMOTION_CONTEXT = None
+    cloud_run_server._RECOVERY_STATE.update({
+        "status": "idle",
+        "attempts": 0,
+        "startedAt": 0,
+        "lastAttemptAt": 0,
+        "recoveredAt": 0,
+        "lastError": None,
+    })
+
+
+def setup_function():
+    runtime_instance_guard.release()
+    _reset_cloud_run_state()
 
 
 def teardown_function():
     runtime_instance_guard.release()
-    cloud_run_server._WORKERS_STARTED = False
-    cloud_run_server._PROMOTION_THREAD = None
+    _reset_cloud_run_state()
 
 
 def test_postgres_leader_lock_is_retained_until_release():
@@ -161,6 +173,74 @@ def test_concurrent_promotion_starts_workers_exactly_once(monkeypatch):
     assert cloud_run_server._WORKERS_STARTED is True
 
 
+def test_lost_session_reacquires_even_when_workers_already_started(monkeypatch):
+    core = core_for(Connection(granted=True))
+    cloud_run_server._WORKERS_STARTED = True
+    acquired = []
+    starts = []
+    monkeypatch.setattr(
+        cloud_run_server.runtime_instance_guard,
+        "acquire",
+        lambda _core: acquired.append(True) or {"leader": True, "reason": "reacquired"},
+    )
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_ORIGINAL_ORCHESTRATOR_START",
+        lambda *args: starts.append(args),
+    )
+
+    assert cloud_run_server._promote_from_standby_once(core, object(), object()) is True
+    assert acquired == [True]
+    assert starts == []
+
+
+def test_scheduler_loss_starts_recovery_and_remains_fail_closed(monkeypatch):
+    core = core_for(Connection(granted=True))
+    symbol_worker = object()
+    setup_worker = object()
+    handoff = object()
+    recovery_calls = []
+    monkeypatch.setattr(cloud_run_server.runtime_instance_guard, "is_leader", lambda: False)
+    monkeypatch.setattr(
+        cloud_run_server.runtime_instance_guard,
+        "snapshot",
+        lambda: {"leader": False, "status": "lost", "reason": "connection lost"},
+    )
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_start_standby_promotion",
+        lambda *args: recovery_calls.append(args),
+    )
+
+    cloud_run_server._install_orchestrator_guard()
+    result = cloud_run_server.secure_server.runtime_orchestrator.run_due_once(
+        core,
+        symbol_worker,
+        setup_worker,
+        handoff,
+    )
+
+    assert result["status"] == "standby"
+    assert core.BOT_STATE["enabled"] is False
+    assert len(recovery_calls) == 1
+    assert recovery_calls[0] == (core, symbol_worker, setup_worker, handoff)
+
+
+def test_recovery_context_is_saved_for_mutation_gate(monkeypatch):
+    core = core_for(Connection(granted=True))
+    context = (core, object(), object(), object())
+    cloud_run_server._remember_promotion_context(*context)
+    calls = []
+    monkeypatch.setattr(
+        cloud_run_server,
+        "_start_standby_promotion",
+        lambda *args: calls.append(args),
+    )
+
+    cloud_run_server._start_recovery_from_saved_context()
+    assert calls == [context]
+
+
 def test_shutdown_blocks_promotion_before_lock_acquisition(monkeypatch):
     core = core_for(Connection(granted=True), shutdown=True)
     acquired = []
@@ -203,6 +283,8 @@ def test_cloud_run_entrypoint_contract_is_explicit():
     assert "_start_standby_promotion" in source
     assert "_promote_from_standby_once" in source
     assert "_start_workers_once" in source
+    assert "_start_recovery_from_saved_context" in source
+    assert "RUNTIME_LEADER_RECOVERY_BASE_SECONDS" in source
     assert "RuntimeLifecycle" in source
     assert 'os.environ.get("PORT", "8080")' in source
     assert '"/api/bot/start"' in source
