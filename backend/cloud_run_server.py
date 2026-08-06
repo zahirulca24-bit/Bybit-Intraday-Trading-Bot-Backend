@@ -28,9 +28,16 @@ for _path in (str(_REPOSITORY_ROOT), str(_BACKEND_DIR)):
         sys.path.insert(0, _path)
 
 if __package__:
-    from . import deployment_readiness, runtime_instance_guard, runtime_lifecycle, secure_server
+    from . import (
+        deployment_readiness,
+        historical_execution_backfill,
+        runtime_instance_guard,
+        runtime_lifecycle,
+        secure_server,
+    )
 else:
     import deployment_readiness
+    import historical_execution_backfill
     import runtime_instance_guard
     import runtime_lifecycle
     import secure_server
@@ -233,7 +240,7 @@ def _install_start_gate() -> None:
     def guarded_start_bot(instance: Any, payload: dict[str, Any]):
         if not runtime_instance_guard.is_leader():
             reason = _leadership_reason()
-            _disable_execution(reason, runtime_core)
+            _disable_execution(reason, core)
             core.json_response(instance, 503, {
                 "ok": False,
                 "enabled": False,
@@ -280,10 +287,30 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
                 "workerRuntime": secure_server.runtime_orchestrator.snapshot(),
             })
             return
+        if path == "/api/live-executions/backfill/status":
+            if secure_server.reject_disallowed_origin(self):
+                return
+            if not secure_server.authorize_get(self, path):
+                return
+            core.json_response(self, 200, historical_execution_backfill.status())
+            return
         return super().do_GET()
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
+        if path == historical_execution_backfill.BACKFILL_PATH:
+            if secure_server.reject_disallowed_origin(self):
+                return
+            if not self.is_authorized():
+                core.json_response(self, 401, {"ok": False, "error": "Unauthorized"})
+                return
+            try:
+                payload = core.read_json(self)
+            except Exception as exc:
+                core.json_response(self, 400, {"ok": False, "error": f"Invalid JSON: {exc}"})
+                return
+            historical_execution_backfill.handle_post(self, core, path, payload)
+            return
         if path in _EXECUTION_MUTATION_PATHS and not runtime_instance_guard.is_leader():
             if secure_server.reject_disallowed_origin(self):
                 return
@@ -291,7 +318,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
                 core.json_response(self, 401, {"ok": False, "error": "Unauthorized"})
                 return
             reason = _leadership_reason()
-            _disable_execution(reason, runtime_core)
+            _disable_execution(reason, core)
             core.json_response(self, 503, {
                 "ok": False,
                 "enabled": False,
@@ -307,6 +334,12 @@ def run() -> None:
     install_cloud_run_safety()
     secure_server.install_secure_runtime()
     _install_start_gate()
+
+    try:
+        backfill_days = int(os.environ.get("EXECUTION_LEDGER_HISTORICAL_BACKFILL_DAYS", "30"))
+    except ValueError:
+        backfill_days = 30
+    historical_execution_backfill.start_once(core, days=backfill_days)
 
     port = int(os.environ.get("PORT", "8080"))
     host = os.environ.get("HOST", "0.0.0.0")
