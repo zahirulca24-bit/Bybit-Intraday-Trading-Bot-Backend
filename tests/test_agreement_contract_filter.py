@@ -19,7 +19,7 @@ class Core:
                     {"symbol": "ETHUSDT"},
                     {"symbol": "CLUSDT"},
                 ],
-                "metrics": {},
+                "metrics": {"deepScan": 4},
             }
 
         self.top_gainer_universe = universe
@@ -35,7 +35,20 @@ def test_builtin_agreement_contracts_are_filtered_from_all_universe_views(monkey
     assert result["symbols"] == ["BTCUSDT", "ETHUSDT"]
     assert [row["symbol"] for row in result["rows"]] == ["BTCUSDT", "ETHUSDT"]
     assert [row["symbol"] for row in result["shortlist"]] == ["ETHUSDT"]
-    assert result["agreementRequiredExcludedSymbols"] == ["CLUSDT", "MUUSDT"]
+    assert result["agreementRequiredExcludedSymbols"] == ["MUUSDT", "CLUSDT"]
+    assert result["metrics"]["agreementRequiredExcluded"] == 2
+    assert result["metrics"]["deepScan"] == 4
+
+
+def test_exclusion_metrics_only_count_symbols_removed_from_current_universe(monkeypatch):
+    monkeypatch.setenv("AGREEMENT_REQUIRED_SYMBOLS", "NOTPRESENTUSDT")
+    core = Core()
+
+    agreement_contract_filter.install(core)
+    result = core.top_gainer_universe(force=True, limit=10)
+
+    assert result["agreementRequiredExcludedSymbols"] == ["MUUSDT", "CLUSDT"]
+    assert result["metrics"]["agreementRequiredExcluded"] == 2
 
 
 def test_direct_scanner_requests_reject_agreement_contracts(monkeypatch):
