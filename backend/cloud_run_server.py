@@ -6,6 +6,7 @@ This wrapper preserves the existing secure runtime while adding:
 - PostgreSQL advisory-lock single-leader ownership for automatic workers;
 - fail-closed checks on order-capable mutation routes;
 - periodic leader-connection verification inside the worker scheduler;
+- automatic recovery after a retained leader session is lost;
 - standby-to-leader promotion after deployment overlap ends;
 - shutdown-safe, exactly-once worker promotion;
 - SIGTERM/SIGINT graceful shutdown and advisory-lock release.
@@ -55,7 +56,16 @@ _ORIGINAL_RUN_DUE_ONCE = secure_server.runtime_orchestrator.run_due_once
 _PATCHED = False
 _PROMOTION_LOCK = threading.RLock()
 _PROMOTION_THREAD: threading.Thread | None = None
+_PROMOTION_CONTEXT: tuple[Any, Any, Any, Any | None] | None = None
 _WORKERS_STARTED = False
+_RECOVERY_STATE: dict[str, Any] = {
+    "status": "idle",
+    "attempts": 0,
+    "startedAt": 0,
+    "lastAttemptAt": 0,
+    "recoveredAt": 0,
+    "lastError": None,
+}
 
 
 def _leadership_reason() -> str:
@@ -82,6 +92,30 @@ def _shutdown_started(runtime_core: Any) -> bool:
         return bool((reader() or {}).get("shutdownStarted"))
     except Exception:
         return False
+
+
+def _remember_promotion_context(
+    runtime_core: Any,
+    symbol_worker: Any,
+    setup_worker: Any,
+    execution_handoff: Any | None,
+) -> None:
+    global _PROMOTION_CONTEXT
+    _PROMOTION_CONTEXT = (
+        runtime_core,
+        symbol_worker,
+        setup_worker,
+        execution_handoff,
+    )
+
+
+def _recovery_snapshot() -> dict[str, Any]:
+    with _PROMOTION_LOCK:
+        payload = dict(_RECOVERY_STATE)
+        payload["threadAlive"] = bool(
+            _PROMOTION_THREAD is not None and _PROMOTION_THREAD.is_alive()
+        )
+        return payload
 
 
 def _start_workers_once(
@@ -122,22 +156,38 @@ def _promote_from_standby_once(
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> bool:
-    """Retry the advisory lock and start workers exactly once on promotion."""
+    """Reacquire leadership and resume or start workers exactly once."""
     with _PROMOTION_LOCK:
         if _shutdown_started(runtime_core):
-            _disable_execution("Runtime shutdown is in progress; promotion is blocked.", runtime_core)
+            _disable_execution(
+                "Runtime shutdown is in progress; promotion is blocked.",
+                runtime_core,
+            )
             return False
-        if _WORKERS_STARTED:
-            return True
+
+        # Always reacquire before considering workers already started. A live
+        # orchestrator thread can remain present after its retained PostgreSQL
+        # advisory-lock connection is lost, but it must not resume execution
+        # until a new session owns the lock.
         leadership = runtime_instance_guard.acquire(runtime_core)
         if not leadership.get("leader"):
-            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."), runtime_core)
+            reason = str(leadership.get("reason") or "Runtime leadership denied.")
+            _RECOVERY_STATE["lastError"] = reason
+            _disable_execution(reason, runtime_core)
             return False
+
         if _shutdown_started(runtime_core):
             reason = "Runtime shutdown started after leadership acquisition; promotion was cancelled."
             runtime_instance_guard.release(runtime_core, reason)
             _disable_execution(reason, runtime_core)
             return False
+
+        # If the original worker loop is still alive, acquiring the new lock is
+        # sufficient. The next scheduler cycle can safely continue without
+        # starting a duplicate worker thread.
+        if _WORKERS_STARTED:
+            return True
+
         return _start_workers_once(
             runtime_core,
             symbol_worker,
@@ -152,23 +202,60 @@ def _start_standby_promotion(
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> None:
-    """Use the orchestrator idle cadence to recover after revision overlap."""
+    """Recover leadership with bounded exponential backoff."""
     global _PROMOTION_THREAD
+    _remember_promotion_context(
+        runtime_core,
+        symbol_worker,
+        setup_worker,
+        execution_handoff,
+    )
     with _PROMOTION_LOCK:
         if _PROMOTION_THREAD is not None and _PROMOTION_THREAD.is_alive():
             return
-        interval = max(1, int(secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1))
+
+        base_delay = max(
+            1.0,
+            float(
+                os.environ.get(
+                    "RUNTIME_LEADER_RECOVERY_BASE_SECONDS",
+                    secure_server.runtime_orchestrator.settings().get("idleSleepSeconds") or 1,
+                )
+            ),
+        )
+        max_delay = max(
+            base_delay,
+            float(os.environ.get("RUNTIME_LEADER_RECOVERY_MAX_SECONDS", "30")),
+        )
+        _RECOVERY_STATE.update({
+            "status": "recovering",
+            "attempts": 0,
+            "startedAt": int(time.time()),
+            "lastAttemptAt": 0,
+            "recoveredAt": 0,
+            "lastError": None,
+        })
 
         def monitor() -> None:
+            delay = base_delay
             while not _shutdown_started(runtime_core):
+                _RECOVERY_STATE["attempts"] = int(_RECOVERY_STATE.get("attempts") or 0) + 1
+                _RECOVERY_STATE["lastAttemptAt"] = int(time.time())
                 if _promote_from_standby_once(
                     runtime_core,
                     symbol_worker,
                     setup_worker,
                     execution_handoff,
                 ):
+                    _RECOVERY_STATE.update({
+                        "status": "recovered",
+                        "recoveredAt": int(time.time()),
+                        "lastError": None,
+                    })
                     return
-                time.sleep(interval)
+                time.sleep(delay)
+                delay = min(max_delay, delay * 2)
+            _RECOVERY_STATE["status"] = "stopped"
 
         _PROMOTION_THREAD = threading.Thread(
             target=monitor,
@@ -176,6 +263,13 @@ def _start_standby_promotion(
             daemon=True,
         )
         _PROMOTION_THREAD.start()
+
+
+def _start_recovery_from_saved_context() -> None:
+    context = _PROMOTION_CONTEXT
+    if context is None:
+        return
+    _start_standby_promotion(*context)
 
 
 def _install_orchestrator_guard() -> None:
@@ -187,18 +281,43 @@ def _install_orchestrator_guard() -> None:
         setup_worker: Any,
         execution_handoff: Any | None = None,
     ) -> dict[str, Any]:
+        _remember_promotion_context(
+            runtime_core,
+            symbol_worker,
+            setup_worker,
+            execution_handoff,
+        )
         leadership = runtime_instance_guard.install(runtime_core)
         if not leadership.get("leader"):
-            _disable_execution(str(leadership.get("reason") or "Runtime leadership denied."), runtime_core)
-            _start_standby_promotion(runtime_core, symbol_worker, setup_worker, execution_handoff)
-            return {"status": "standby", "threadAlive": False, "runtimeLeadership": leadership}
-        started = _start_workers_once(runtime_core, symbol_worker, setup_worker, execution_handoff)
+            _disable_execution(
+                str(leadership.get("reason") or "Runtime leadership denied."),
+                runtime_core,
+            )
+            _start_standby_promotion(
+                runtime_core,
+                symbol_worker,
+                setup_worker,
+                execution_handoff,
+            )
+            return {
+                "status": "standby",
+                "threadAlive": False,
+                "runtimeLeadership": leadership,
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
+            }
+        started = _start_workers_once(
+            runtime_core,
+            symbol_worker,
+            setup_worker,
+            execution_handoff,
+        )
         if not started:
             return {
                 "status": "blocked",
                 "threadAlive": False,
                 "lastError": _leadership_reason(),
                 "runtimeLeadership": runtime_instance_guard.snapshot(),
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
             }
         return secure_server.runtime_orchestrator.snapshot()
 
@@ -209,14 +328,27 @@ def _install_orchestrator_guard() -> None:
         execution_handoff: Any | None = None,
         now: int | None = None,
     ) -> dict[str, Any]:
+        _remember_promotion_context(
+            runtime_core,
+            symbol_worker,
+            setup_worker,
+            execution_handoff,
+        )
         if not runtime_instance_guard.is_leader():
             reason = _leadership_reason()
             _disable_execution(reason, runtime_core)
+            _start_standby_promotion(
+                runtime_core,
+                symbol_worker,
+                setup_worker,
+                execution_handoff,
+            )
             return {
                 "status": "standby",
                 "threadAlive": False,
                 "lastError": reason,
                 "runtimeLeadership": runtime_instance_guard.snapshot(),
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
             }
         return _ORIGINAL_RUN_DUE_ONCE(
             runtime_core,
@@ -241,11 +373,13 @@ def _install_start_gate() -> None:
         if not runtime_instance_guard.is_leader():
             reason = _leadership_reason()
             _disable_execution(reason, core)
+            _start_recovery_from_saved_context()
             core.json_response(instance, 503, {
                 "ok": False,
                 "enabled": False,
                 "reason": reason,
                 "runtimeLeadership": runtime_instance_guard.snapshot(),
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
             })
             return
         return original_start(instance, payload)
@@ -274,6 +408,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
             readiness = deployment_readiness.runtime_readiness(
                 core, runtime_instance_guard, secure_server.runtime_orchestrator
             )
+            readiness["runtimeLeadershipRecovery"] = _recovery_snapshot()
             core.json_response(self, 200 if readiness.get("ok") else 503, readiness)
             return
         if path == "/api/runtime/leadership":
@@ -284,6 +419,7 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
             core.json_response(self, 200, {
                 "ok": True,
                 "runtimeLeadership": runtime_instance_guard.snapshot(),
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
                 "workerRuntime": secure_server.runtime_orchestrator.snapshot(),
             })
             return
@@ -319,11 +455,13 @@ class CloudRunSecureHandler(secure_server.SecurePositionSyncedHandler):
                 return
             reason = _leadership_reason()
             _disable_execution(reason, core)
+            _start_recovery_from_saved_context()
             core.json_response(self, 503, {
                 "ok": False,
                 "enabled": False,
                 "reason": reason,
                 "runtimeLeadership": runtime_instance_guard.snapshot(),
+                "runtimeLeadershipRecovery": _recovery_snapshot(),
             })
             return
         return super().do_POST()
