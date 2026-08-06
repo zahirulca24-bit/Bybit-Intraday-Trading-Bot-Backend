@@ -241,23 +241,26 @@ def _start_standby_promotion(
         def monitor() -> None:
             delay = base_delay
             while not _shutdown_started(runtime_core):
-                _RECOVERY_STATE["attempts"] = int(_RECOVERY_STATE.get("attempts") or 0) + 1
-                _RECOVERY_STATE["lastAttemptAt"] = int(time.time())
+                with _PROMOTION_LOCK:
+                    _RECOVERY_STATE["attempts"] = int(_RECOVERY_STATE.get("attempts") or 0) + 1
+                    _RECOVERY_STATE["lastAttemptAt"] = int(time.time())
                 if _promote_from_standby_once(
                     runtime_core,
                     symbol_worker,
                     setup_worker,
                     execution_handoff,
                 ):
-                    _RECOVERY_STATE.update({
-                        "status": "recovered",
-                        "recoveredAt": int(time.time()),
-                        "lastError": None,
-                    })
+                    with _PROMOTION_LOCK:
+                        _RECOVERY_STATE.update({
+                            "status": "recovered",
+                            "recoveredAt": int(time.time()),
+                            "lastError": None,
+                        })
                     return
                 time.sleep(delay)
                 delay = min(max_delay, delay * 2)
-            _RECOVERY_STATE["status"] = "stopped"
+            with _PROMOTION_LOCK:
+                _RECOVERY_STATE["status"] = "stopped"
 
         _PROMOTION_THREAD = threading.Thread(
             target=monitor,
