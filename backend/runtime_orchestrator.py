@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any
 
+_BACKOFF_SCHEDULE_SECONDS = (5, 10, 20, 40, 80)
+_BACKOFF_MAX_SECONDS = 300
 _LOCK = threading.Lock()
 _STOP_EVENT = threading.Event()
 _THREAD: threading.Thread | None = None
@@ -35,6 +37,12 @@ _STATE: dict[str, Any] = {
     "legacySetupWorkerDisabled": True,
     "legacyPythonExecutionDisabled": True,
     "lastError": None,
+    "backoffActive": False,
+    "consecutiveFailureCount": 0,
+    "currentRetryDelaySeconds": 0,
+    "nextRetryAt": 0,
+    "lastFailureAt": 0,
+    "lastFailureCategory": None,
 }
 
 
@@ -119,6 +127,58 @@ def _run_execution_command_outbox(
     return execution_command_outbox.ensure_current(core, now=now)
 
 
+def _classify_failure(exc: Exception) -> str:
+    message = str(exc or "").lower()
+    name = exc.__class__.__name__.lower()
+    haystack = f"{name} {message}"
+    if any(token in haystack for token in ("postgres", "database", "sql", "cursor", "connection")):
+        return "database"
+    if any(
+        token in haystack
+        for token in ("bybit", "exchange", "api", "http", "timeout", "429", "rate limit")
+    ):
+        return "exchange/API"
+    if any(
+        token in haystack
+        for token in ("market data", "ticker", "tickers", "kline", "candles", "ohlcv", "orderbook")
+    ):
+        return "market data"
+    if isinstance(exc, ValueError) or "validation" in haystack or "invalid" in haystack:
+        return "validation"
+    return "unknown"
+
+
+def _retry_delay_seconds(failure_count: int) -> int:
+    if failure_count <= 0:
+        return 0
+    if failure_count <= len(_BACKOFF_SCHEDULE_SECONDS):
+        return int(_BACKOFF_SCHEDULE_SECONDS[failure_count - 1])
+    return _BACKOFF_MAX_SECONDS
+
+
+def _reset_failure_state() -> None:
+    _STATE["backoffActive"] = False
+    _STATE["consecutiveFailureCount"] = 0
+    _STATE["currentRetryDelaySeconds"] = 0
+    _STATE["nextRetryAt"] = 0
+    _STATE["lastFailureAt"] = 0
+    _STATE["lastFailureCategory"] = None
+
+
+def _record_failure(exc: Exception, timestamp: int) -> None:
+    failure_count = int(_STATE.get("consecutiveFailureCount") or 0) + 1
+    retry_delay = _retry_delay_seconds(failure_count)
+    _STATE["status"] = "backoff"
+    _STATE["lastLoopAt"] = timestamp
+    _STATE["lastError"] = str(exc)
+    _STATE["backoffActive"] = retry_delay > 0
+    _STATE["consecutiveFailureCount"] = failure_count
+    _STATE["currentRetryDelaySeconds"] = retry_delay
+    _STATE["nextRetryAt"] = timestamp + retry_delay
+    _STATE["lastFailureAt"] = timestamp
+    _STATE["lastFailureCategory"] = _classify_failure(exc)
+
+
 def run_due_once(
     core: Any,
     symbol_worker: Any,
@@ -130,6 +190,12 @@ def run_due_once(
     timestamp = int(now or time.time())
     cfg = settings()
     with _LOCK:
+        next_retry_at = int(_STATE.get("nextRetryAt") or 0)
+        if next_retry_at > timestamp:
+            _STATE["status"] = "backoff"
+            _STATE["lastLoopAt"] = timestamp
+            _STATE["backoffActive"] = True
+            return snapshot_unlocked()
         symbol_due = int(_STATE.get("nextSymbolRunAt") or 0) <= timestamp
         setup_due = int(_STATE.get("nextSetupRunAt") or 0) <= timestamp
 
@@ -175,12 +241,12 @@ def run_due_once(
             _STATE["nextExecutionRunAt"] = 0
             _STATE["lastLoopAt"] = timestamp
             _STATE["lastError"] = None
+            _STATE["status"] = "running"
+            _reset_failure_state()
         return snapshot()
     except Exception as exc:
         with _LOCK:
-            _STATE["status"] = "error"
-            _STATE["lastLoopAt"] = timestamp
-            _STATE["lastError"] = str(exc)
+            _record_failure(exc, timestamp)
         return snapshot()
 
 
@@ -449,6 +515,12 @@ def start(
                 "legacySetupWorkerDisabled": True,
                 "legacyPythonExecutionDisabled": True,
                 "lastError": None,
+                "backoffActive": False,
+                "consecutiveFailureCount": 0,
+                "currentRetryDelaySeconds": 0,
+                "nextRetryAt": 0,
+                "lastFailureAt": 0,
+                "lastFailureCategory": None,
             }
         )
         _THREAD = threading.Thread(
@@ -476,8 +548,13 @@ def stop(timeout: float = 5.0) -> dict[str, Any]:
 
 
 def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
+    next_retry_at = int(_STATE.get("nextRetryAt") or 0)
+    now = int(time.time())
+    backoff_active = bool(next_retry_at > now or _STATE.get("backoffActive"))
     return {
         **dict(_STATE),
+        "status": "backoff" if backoff_active else _STATE.get("status"),
+        "backoffActive": backoff_active,
         "threadAlive": bool(_THREAD is not None and _THREAD.is_alive()),
         "settings": settings(),
         "dailyUniverse": _daily_universe_status(),

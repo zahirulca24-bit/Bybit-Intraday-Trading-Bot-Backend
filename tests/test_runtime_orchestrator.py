@@ -57,6 +57,12 @@ def reset_state():
                 "legacySetupWorkerDisabled": True,
                 "legacyPythonExecutionDisabled": True,
                 "lastError": None,
+                "backoffActive": False,
+                "consecutiveFailureCount": 0,
+                "currentRetryDelaySeconds": 0,
+                "nextRetryAt": 0,
+                "lastFailureAt": 0,
+                "lastFailureCategory": None,
             }
         )
 
@@ -214,3 +220,165 @@ def test_orchestrator_never_runs_legacy_execution_handoff(monkeypatch):
     assert execution.calls == []
     assert state["executionRuns"] == 0
     assert state["settings"]["legacyPythonExecutionEnabled"] is False
+
+
+def test_first_failure_schedules_five_second_retry(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("database connection refused")
+
+    monkeypatch.setattr(orchestrator, "_run_fifteen_minute_strategy_classifier", fail)
+    state = orchestrator.run_due_once(object(), symbol, setup, now=1000)
+
+    assert state["status"] == "backoff"
+    assert state["backoffActive"] is True
+    assert state["consecutiveFailureCount"] == 1
+    assert state["currentRetryDelaySeconds"] == 5
+    assert state["nextRetryAt"] == 1005
+    assert state["lastFailureAt"] == 1000
+    assert state["lastFailureCategory"] == "database"
+
+
+def test_repeated_failures_increase_delay_exponentially(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+    times = [1000, 1005, 1015, 1035, 1075]
+    expected_delays = [5, 10, 20, 40, 80]
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("Bybit API timeout")
+
+    monkeypatch.setattr(orchestrator, "_run_fifteen_minute_strategy_classifier", fail)
+
+    for index, timestamp in enumerate(times):
+        state = orchestrator.run_due_once(object(), symbol, setup, now=timestamp)
+        assert state["consecutiveFailureCount"] == index + 1
+        assert state["currentRetryDelaySeconds"] == expected_delays[index]
+        assert state["nextRetryAt"] == timestamp + expected_delays[index]
+        assert state["lastFailureCategory"] == "exchange/API"
+
+
+def test_retry_delay_never_exceeds_three_hundred_seconds(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("market data candles unavailable")
+
+    monkeypatch.setattr(orchestrator, "_run_fifteen_minute_strategy_classifier", fail)
+
+    timestamp = 1000
+    state = {}
+    for _ in range(10):
+        state = orchestrator.run_due_once(object(), symbol, setup, now=timestamp)
+        timestamp = state["nextRetryAt"]
+
+    assert state["currentRetryDelaySeconds"] == 300
+    assert state["nextRetryAt"] == timestamp
+    assert state["lastFailureCategory"] == "market data"
+
+
+def test_pipeline_does_not_rerun_before_next_retry_at(monkeypatch):
+    reset_state()
+    calls = install_stage_spies(monkeypatch)
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+
+    def fail_once(core, now):
+        calls["classification"].append(now)
+        raise ValueError("validation failed for setup payload")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_fifteen_minute_strategy_classifier",
+        fail_once,
+    )
+
+    failed = orchestrator.run_due_once(object(), symbol, setup, now=1000)
+    paused = orchestrator.run_due_once(object(), symbol, setup, now=1004)
+
+    assert symbol.calls == [1000]
+    assert calls["classification"] == [1000]
+    assert paused["status"] == "backoff"
+    assert paused["nextRetryAt"] == 1005
+    assert paused["consecutiveFailureCount"] == 1
+    assert failed["lastFailureCategory"] == "validation"
+
+
+def test_successful_run_resets_failure_state(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+    attempts = {"count": 0}
+
+    def fail_then_succeed(core, now):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("database unavailable")
+        return {"status": "ready"}
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_fifteen_minute_strategy_classifier",
+        fail_then_succeed,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_five_minute_entry_confirmation",
+        lambda core, now: {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_authoritative_entry_risk",
+        lambda core, now: {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_position_sizing_margin",
+        lambda core, now: {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_run_execution_command_outbox",
+        lambda core, now: {"status": "ready"},
+    )
+
+    orchestrator.run_due_once(object(), symbol, setup, now=1000)
+    state = orchestrator.run_due_once(object(), symbol, setup, now=1005)
+
+    assert state["status"] == "running"
+    assert state["backoffActive"] is False
+    assert state["consecutiveFailureCount"] == 0
+    assert state["currentRetryDelaySeconds"] == 0
+    assert state["nextRetryAt"] == 0
+    assert state["lastFailureAt"] == 0
+    assert state["lastFailureCategory"] is None
+    assert state["lastError"] is None
+
+
+def test_runtime_snapshot_reports_backoff_state(monkeypatch):
+    reset_state()
+    symbol = StubSymbolWorker()
+    setup = StubSetupWorker()
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("database transaction aborted")
+
+    monkeypatch.setattr(orchestrator, "_run_fifteen_minute_strategy_classifier", fail)
+    monkeypatch.setattr(orchestrator.time, "time", lambda: 1002)
+
+    orchestrator.run_due_once(object(), symbol, setup, now=1000)
+    snapshot = orchestrator.snapshot()
+
+    assert snapshot["status"] == "backoff"
+    assert snapshot["backoffActive"] is True
+    assert snapshot["currentRetryDelaySeconds"] == 5
+    assert snapshot["nextRetryAt"] == 1005
+    assert snapshot["lastFailureCategory"] == "database"
+    assert snapshot["legacySetupWorkerDisabled"] is True
+    assert snapshot["legacyPythonExecutionDisabled"] is True
