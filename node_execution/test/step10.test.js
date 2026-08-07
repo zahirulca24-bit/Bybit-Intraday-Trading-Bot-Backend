@@ -9,12 +9,12 @@ import { createHealthServer } from '../src/httpServer.js';
 const now = Math.floor(Date.now() / 1000);
 const payload = {
   candidateKey: 'cand-1', symbol: 'BTCUSDT', side: 'Buy', positionSizingStatus: 'SIZING_APPROVED', sizingApproved: true,
-  sizingDecisionAt: now, executionStatus: 'AWAITING_NODE_EXECUTION', orderSubmitted: false, marginMode: 'ISOLATED', leverage: 5,
-  qty: '0.100', entryReference: 100, technicalStopLoss: 99, takeProfitReference: 102, requiredInitialMarginUsdt: 2,
-  projectedTotalInitialMarginUsdt: 102,
-  nodeExecutionRequirements: { marginMode: 'ISOLATED', leverage: 5, revalidateWalletAndInstrumentRules: true, submitOnlyAfterRevalidation: true },
+  sizingDecisionAt: now, executionStatus: 'AWAITING_NODE_EXECUTION', orderSubmitted: false, marginMode: 'ISOLATED', leverage: 10,
+  qty: '0.100', entryReference: 100, technicalStopLoss: 99, takeProfitReference: 102, requiredInitialMarginUsdt: 1,
+  projectedTotalInitialMarginUsdt: 101,
+  nodeExecutionRequirements: { marginMode: 'ISOLATED', leverage: 10, revalidateWalletAndInstrumentRules: true, submitOnlyAfterRevalidation: true },
 };
-const config = { maxCandidateAgeSeconds: 1200, maxEntryDriftPct: 0.5, minimumGrossRr: 2, leverage: 5, marginMode: 'ISOLATED_MARGIN', category: 'linear' };
+const config = { maxCandidateAgeSeconds: 1200, maxEntryDriftPct: 0.5, minimumGrossRr: 2, leverage: 10, maxActiveTrades: 3, marginMode: 'ISOLATED_MARGIN', category: 'linear' };
 function liveTruth(overrides = {}) { return {
   wallet: { result: { list: [{ totalEquity: '1000', totalAvailableBalance: '800', totalInitialMargin: '100' }] } },
   instrument: { result: { list: [{ status: 'Trading', lotSizeFilter: { minOrderQty: '0.001', maxMktOrderQty: '10', qtyStep: '0.001', minNotionalValue: '5' }, leverageFilter: { maxLeverage: '100' } }] } },
@@ -42,14 +42,14 @@ function bybitMock(resolution = { state: 'FILLED', executions: [{ execId: 'e1', 
 
 test('configuration is demo-only, requires stable owner identity, and is enabled by default', () => {
   const env = { DATABASE_URL: 'postgres://x', BYBIT_API_KEY: 'k', BYBIT_API_SECRET: 's', NODE_EXECUTION_OWNER_ID: 'bybit-executor-prod' };
-  const cfg = loadConfig(env); assert.equal(cfg.baseUrl, 'https://api-demo.bybit.com'); assert.equal(cfg.enabled, true); assert.equal(cfg.port, 8080);
+  const cfg = loadConfig(env); assert.equal(cfg.baseUrl, 'https://api-demo.bybit.com'); assert.equal(cfg.enabled, true); assert.equal(cfg.port, 8080); assert.equal(cfg.leverage, 10); assert.deepEqual(cfg.gradeRiskPct, { 'A+': 1.0, A: 1.0 });
   assert.throws(() => loadConfig({ ...env, BYBIT_BASE_URL: 'https://api.bybit.com' }), /locked to Bybit Demo/);
   assert.throws(() => loadConfig({ ...env, NODE_EXECUTION_OWNER_ID: '' }), /required/);
 });
 test('order identity is deterministic and bounded', () => { assert.equal(orderLinkId('abc'), orderLinkId('abc')); assert.notEqual(orderLinkId('abc'), orderLinkId('def')); assert.ok(orderLinkId('abc').length <= 36); });
 test('contract and final live truth are revalidated', () => {
-  assert.equal(validateContract(payload, 'cand-1'), payload); const result = revalidateLive(payload, liveTruth(), config, now); assert.equal(result.markPrice, 100); assert.equal(result.grossRr, 2);
-  assert.throws(() => validateContract({ ...payload, leverage: 10 }, 'cand-1'), /Isolated 5x/);
+  assert.equal(validateContract(payload, 'cand-1'), payload); const result = revalidateLive(payload, liveTruth(), config, now); assert.equal(result.markPrice, 100); assert.equal(result.grossRr, 2); assert.equal(result.requiredInitialMargin, 1);
+  assert.throws(() => validateContract({ ...payload, leverage: 11, nodeExecutionRequirements: { ...payload.nodeExecutionRequirements, leverage: 11 } }, 'cand-1'), /no greater than 10x/);
   assert.throws(() => revalidateLive(payload, liveTruth({ ticker: { result: { list: [{ markPrice: '101' }] } } }), config, now), /drift/);
   assert.throws(() => revalidateLive({ ...payload, qty: '0.1005' }, liveTruth(), config, now), /qtyStep/);
   assert.throws(() => revalidateLive({ ...payload, sizingDecisionAt: now - 5000 }, liveTruth(), config, now), /stale/);

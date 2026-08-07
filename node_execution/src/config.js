@@ -21,7 +21,7 @@ export function loadConfig(env = process.env) {
   }
   const enabled = String(env.NODE_EXECUTION_ENABLED || 'true').toLowerCase() === 'true';
   const maxActiveTrades = Math.trunc(boundedNumber(env, 'MAX_ACTIVE_TRADES', 3, 3, 3));
-  const gradeRiskPct = Object.freeze({ 'A+': 1.0, A: 0.75 });
+  const gradeRiskPct = Object.freeze({ 'A+': 1.0, A: 1.0 });
   return Object.freeze({
     databaseUrl: required(env, 'DATABASE_URL'),
     apiKey: required(env, 'BYBIT_API_KEY'),
@@ -40,7 +40,7 @@ export function loadConfig(env = process.env) {
     maxCandidateAgeSeconds: boundedNumber(env, 'EXECUTION_CANDIDATE_MAX_AGE_SECONDS', 1200, 60, 3600),
     maxEntryDriftPct: boundedNumber(env, 'EXECUTION_MAX_ENTRY_DRIFT_PCT', 0.50, 0.05, 3.0),
     minimumGrossRr: 2.0,
-    leverage: 5,
+    leverage: 10,
     marginMode: 'ISOLATED_MARGIN',
     category: 'linear',
     settleCoin: 'USDT',
