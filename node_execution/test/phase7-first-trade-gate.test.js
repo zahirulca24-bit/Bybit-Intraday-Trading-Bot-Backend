@@ -7,7 +7,7 @@ function config(overrides = {}) {
     baseUrl: 'https://api-demo.bybit.com',
     enabled: true,
     firstDemoTradeArmed: true,
-    maxActiveTrades: 1,
+    maxActiveTrades: 3,
     riskPerTradePct: 0.25,
     ...overrides,
   };
@@ -28,13 +28,13 @@ function repository(active = []) {
   };
 }
 
-test('clean Demo account arms exactly one controlled trade', async () => {
+test('clean Demo account arms three controlled execution slots', async () => {
   const result = await evaluateFirstTradeGate({ bybit: bybit(), repository: repository(), config: config() });
   assert.equal(result.ok, true);
   assert.equal(result.openPositionCount, 0);
   assert.equal(result.openOrderCount, 0);
   assert.equal(result.activeCommandCount, 0);
-  assert.equal(result.maxActiveTrades, 1);
+  assert.equal(result.maxActiveTrades, 3);
   assert.equal(result.riskPerTradePct, 0.25);
 });
 
@@ -42,6 +42,12 @@ test('gate remains fail-closed unless separately armed', async () => {
   const result = await evaluateFirstTradeGate({ bybit: bybit(), repository: repository(), config: config({ firstDemoTradeArmed: false }) });
   assert.equal(result.ok, false);
   assert.match(result.reasons.join(' '), /FIRST_DEMO_TRADE_ARMED/);
+});
+
+test('gate rejects an invalid active-trade contract', async () => {
+  const result = await evaluateFirstTradeGate({ bybit: bybit(), repository: repository(), config: config({ maxActiveTrades: 1 }) });
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join(' '), /MAX_ACTIVE_TRADES must equal 3/);
 });
 
 test('open exchange truth or unresolved database command blocks activation', async () => {
