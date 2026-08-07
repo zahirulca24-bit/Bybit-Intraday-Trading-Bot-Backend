@@ -21,7 +21,7 @@ export function loadConfig(env = process.env) {
   }
   const enabled = String(env.NODE_EXECUTION_ENABLED || 'false').toLowerCase() === 'true';
   const firstDemoTradeArmed = String(env.FIRST_DEMO_TRADE_ARMED || 'false').toLowerCase() === 'true';
-  const maxActiveTrades = Math.trunc(boundedNumber(env, 'FIRST_DEMO_MAX_ACTIVE_TRADES', 1, 1, 1));
+  const maxActiveTrades = Math.trunc(boundedNumber(env, 'MAX_ACTIVE_TRADES', 3, 3, 3));
   const riskPerTradePct = boundedNumber(env, 'FIRST_DEMO_RISK_PER_TRADE_PCT', 0.25, 0.25, 0.25);
   return Object.freeze({
     databaseUrl: required(env, 'DATABASE_URL'),
