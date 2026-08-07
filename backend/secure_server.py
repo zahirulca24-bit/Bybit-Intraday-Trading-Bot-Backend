@@ -13,7 +13,7 @@ try:
     from . import bybit_endpoint_policy, cost_policy_fix, execution_handoff, intraday_scanner
     from . import execution_handoff_safety_hotfix, execution_idempotency
     from . import execution_idempotency_race_fix, execution_idempotency_review_fix
-    from . import live_execution_ledger
+    from . import execution_truth_recovery, live_execution_ledger
     from . import position_synced_server as verified
     from . import replay_collector, replay_engine, replay_performance_journal
     from . import replay_safety, replay_sessions, replay_visualization
@@ -42,6 +42,7 @@ except ImportError:
     import execution_idempotency
     import execution_idempotency_race_fix
     import execution_idempotency_review_fix
+    import execution_truth_recovery
     import intraday_scanner
     import live_execution_ledger
     import position_synced_server as verified
@@ -185,6 +186,7 @@ class SecurePositionSyncedHandler(verified.PositionSyncedHandler):
                 "demoEndpointPolicy": bybit_endpoint_policy.policy_status(),
                 "agreementContractFilter": agreement_contract_filter.status(),
                 "agreementExecutionGuard": agreement_execution_guard.status(core),
+                "executionTruthRecovery": execution_truth_recovery.status(core),
                 "costPolicyFixInstalled": bool(getattr(core, "_cost_policy_fix_installed", False)),
                 "executionHandoffSafetyHotfixInstalled": bool(
                     getattr(core, "_execution_handoff_p0_03_hotfix_installed", False)
@@ -278,6 +280,7 @@ def install_secure_runtime() -> None:
     core.existing_position_guard = verified._protected_existing_position_guard
     install_durable_runtime(core)
     live_execution_ledger.install(core)
+    execution_truth_recovery.install(core, analytics_runtime)
     authoritative_daily_risk.install(core)
     replay_collector.install(core)
     replay_sessions.install(core)

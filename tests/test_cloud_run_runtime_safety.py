@@ -79,13 +79,24 @@ def _reset_cloud_run_state():
     })
 
 
+def _restore_orchestrator_guard():
+    cloud_run_server.secure_server.runtime_orchestrator.start = (
+        cloud_run_server._ORIGINAL_ORCHESTRATOR_START
+    )
+    cloud_run_server.secure_server.runtime_orchestrator.run_due_once = (
+        cloud_run_server._ORIGINAL_RUN_DUE_ONCE
+    )
+
+
 def setup_function():
     runtime_instance_guard.release()
+    _restore_orchestrator_guard()
     _reset_cloud_run_state()
 
 
 def teardown_function():
     runtime_instance_guard.release()
+    _restore_orchestrator_guard()
     _reset_cloud_run_state()
 
 
