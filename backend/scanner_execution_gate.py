@@ -132,14 +132,20 @@ def install(core: Any) -> None:
         if symbol not in eligible:
             engine.set_status("risk", "blocked")
             return False, "Symbol is not in the current liquid intraday eligible universe"
+
         market = next((row for row in universe.get("rows") or [] if row.get("symbol") == symbol), {})
         tier = market.get("costTier")
         context = getattr(core, "_current_scanner_signal", {}) or {}
         current_votes = context.get("votes") if context.get("symbol") == symbol and context.get("signal") == signal else []
         matching_votes = sum(1 for vote in current_votes if vote.get("signal") == signal)
-        if tier == "strong_only" and matching_votes < 2:
+
+        # Locked 08 Aug 2026 rule: one valid matching strategy is sufficient.
+        # Cost tier may affect sizing/cost treatment, but it must not create a
+        # second strategy-count rejection gate requiring two matching votes.
+        if tier == "strong_only" and matching_votes < 1:
             engine.set_status("risk", "blocked")
-            return False, "Wide-spread tier requires at least two matching current strategy votes"
+            return False, "Wide-spread tier requires at least one matching current strategy vote"
+
         return original_risk_check(state, signal)
 
     core.evaluate_signal = current_vote_evaluate
