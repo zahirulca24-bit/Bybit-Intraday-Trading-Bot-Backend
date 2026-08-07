@@ -397,3 +397,37 @@ Current services:
 Frontend: https://bybit-intraday-trading-bot-frontend-liard.vercel.app
 Python backend: https://bybit-intraday-backend-608992045433.asia-south1.run.app
 ```
+
+## Strict audit remediation register
+
+### Fix 1 — Unify the minimum 24h turnover threshold
+
+**Status:** Identified — source-code fix not yet applied.
+
+**Problem**
+
+The minimum 24h turnover filter currently has multiple authorities and conflicting defaults across active backend paths:
+
+- `backend/intraday_scanner.py` reads `MIN_TURNOVER_24H` with a default of `10_000_000` and skips symbols below that threshold.
+- `backend/worker.py` reads a separate variable, `SYMBOL_WORKER_MIN_TURNOVER_24H`, with a default of `10_000_000` and independently skips symbols below that threshold.
+- `backend/server.py` uses a hard-coded `MIN_TURNOVER_24H = 1_500_000` for its turnover filtering path.
+- `backend/.env.example` currently documents `MIN_TURNOVER_24H=10000000`.
+
+This means scanner, worker and server paths can apply different liquidity thresholds to the same symbol. A symbol can pass one path and be rejected by another, and changing one environment variable does not currently guarantee that all paths are aligned.
+
+**Required fix**
+
+1. Make `MIN_TURNOVER_24H` the single configuration authority for all relevant scanner/worker/server turnover checks.
+2. Remove `SYMBOL_WORKER_MIN_TURNOVER_24H` as a separate turnover-policy authority and make the worker consume `MIN_TURNOVER_24H`.
+3. Remove the hard-coded `1_500_000` turnover threshold from `backend/server.py` and make that path consume `MIN_TURNOVER_24H` as well.
+4. Keep the threshold environment-configurable; do not introduce another hard-coded execution/scanner threshold elsewhere.
+5. Set the proposed initial configured value to `3_000_000` (`MIN_TURNOVER_24H=3000000`) and keep it changeable without editing source code.
+6. Add/update tests so scanner, worker and server paths demonstrably consume the same configured value.
+
+**Acceptance criteria**
+
+- One environment variable, `MIN_TURNOVER_24H`, controls all applicable 24h turnover filters.
+- No active scanner/worker/server path retains a conflicting hard-coded turnover threshold.
+- Changing `MIN_TURNOVER_24H` changes the applicable threshold consistently across all three paths.
+- Existing unrelated strategy, risk, sizing and execution behavior remains unchanged.
+- Python and Node regression suites remain green after implementation.
