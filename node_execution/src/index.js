@@ -119,14 +119,12 @@ async function coordinator() {
       }
 
       const adopted = await repository.adoptActiveCommands(config.ownerId);
-      if (adopted.length > config.maxActiveTrades) throw new Error('Controlled first-trade mode permits only one active command.');
+      if (adopted.length > config.maxActiveTrades) throw new Error(`Execution permits at most ${config.maxActiveTrades} active commands.`);
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      setSlot(2, 'ARMED_STANDBY');
-      setSlot(3, 'ARMED_STANDBY');
       console.log(JSON.stringify({ level: 'info', event: 'controlled_demo_execution_ready', ownerId: config.ownerId, riskPerTradePct: config.riskPerTradePct, maxActiveTrades: config.maxActiveTrades }));
-      await slotLoop(1);
+      await Promise.all([1, 2, 3].map((slotId) => slotLoop(slotId)));
 
       workersStarted = false;
       runtime.ready = false;
