@@ -1,9 +1,11 @@
-"""Persistent authoritative position sizing for the locked 08 Aug 2026 plan.
+"""Authoritative non-rejecting position sizing for the locked 08 Aug 2026 plan.
 
-This stage consumes authoritative risk-approved closed-5M candidates, derives the
-existing structural 15M stop/target plan, and sizes the position from approved
-risk and stop distance. It never submits exchange orders or mutates exchange
-margin settings. Node.js remains the execution owner.
+Risk approval is the trade-eligibility decision. This module is a calculator and
+exchange adapter only: it derives a structural stop/target, calculates quantity
+from the approved risk budget, applies real available margin and Bybit instrument
+rules, and prepares the Node execution payload. It never turns an already
+risk-approved candidate into a trade rejection. Missing sizing inputs are exposed
+as SIZING_WAIT so the candidate can be retried without changing eligibility.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ except ImportError:  # pragma: no cover
     from scanner_safety import filter_closed_candles
 
 
-POLICY_ID = "POSITION_SIZING_LOCKED_2026_08_08"
+POLICY_ID = "POSITION_SIZING_NON_REJECTING_2026_08_08"
 _PERSIST_KEY = "position_sizing_margin_v1"
 LEVERAGE = 10.0
 MARGIN_MODE = "ISOLATED"
@@ -36,9 +38,9 @@ _PRICE_PLAN: Callable[..., tuple[dict[str, float] | None, str]] | None = None
 
 _STATE: dict[str, Any] = {
     "status": "idle",
-    "version": 2,
+    "version": 3,
     "policyId": POLICY_ID,
-    "source": "authoritative_risk_existing_technical_plan",
+    "source": "risk_approved_non_rejecting_sizing",
     "fiveMinuteCandleTime": None,
     "inputFingerprint": None,
     "updatedAt": 0,
@@ -64,9 +66,9 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
     approved = [dict(row) for row in _STATE.get("approvedSizingQueue") or []]
     return {
         "status": status_override or str(_STATE.get("status") or "idle"),
-        "version": int(_STATE.get("version") or 2),
+        "version": int(_STATE.get("version") or 3),
         "policyId": str(_STATE.get("policyId") or POLICY_ID),
-        "source": str(_STATE.get("source") or "authoritative_risk_existing_technical_plan"),
+        "source": str(_STATE.get("source") or "risk_approved_non_rejecting_sizing"),
         "fiveMinuteCandleTime": _STATE.get("fiveMinuteCandleTime"),
         "inputFingerprint": _STATE.get("inputFingerprint"),
         "updatedAt": int(_STATE.get("updatedAt") or 0),
@@ -77,6 +79,7 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
         "lastError": _STATE.get("lastError"),
         "persisted": bool(_STATE.get("persisted")),
         "orderSubmissions": 0,
+        "tradeRejectionAuthority": False,
     }
 
 
@@ -118,9 +121,9 @@ def _load_persisted() -> None:
         _STATE.update(
             {
                 "status": str(saved.get("status") or "idle"),
-                "version": int(saved.get("version") or 2),
+                "version": int(saved.get("version") or 3),
                 "policyId": POLICY_ID,
-                "source": "authoritative_risk_existing_technical_plan",
+                "source": "risk_approved_non_rejecting_sizing",
                 "fiveMinuteCandleTime": saved.get("fiveMinuteCandleTime"),
                 "inputFingerprint": saved.get("inputFingerprint"),
                 "updatedAt": int(saved.get("updatedAt") or 0),
@@ -200,6 +203,27 @@ def _setup_config() -> dict[str, Any]:
 
 
 def _technical_plan(core: Any, candidate: Mapping[str, Any]) -> tuple[dict[str, float] | None, str]:
+    # Reuse already-carried structural values first when upstream supplied them.
+    carried_stop = _number(
+        candidate.get("technicalStopLoss")
+        or candidate.get("stopLoss")
+        or candidate.get("stopLossPrice"),
+        0.0,
+    )
+    carried_take = _number(
+        candidate.get("takeProfitReference")
+        or candidate.get("takeProfit")
+        or candidate.get("takeProfitPrice"),
+        0.0,
+    )
+    carried_entry = _number(candidate.get("entryReference"), 0.0)
+    if carried_stop > 0 and carried_take > 0 and carried_entry > 0:
+        return {
+            "entryReference": carried_entry,
+            "stopLoss": carried_stop,
+            "takeProfitReference": carried_take,
+        }, "Upstream structural plan reused"
+
     if _PRICE_PLAN is None:
         return None, "Existing setup-worker price-plan helper is unavailable"
     symbol = str(candidate.get("symbol") or "").upper()
@@ -222,7 +246,7 @@ def _technical_plan(core: Any, candidate: Mapping[str, Any]) -> tuple[dict[str, 
     if not history or int(history[-1].get("time") or 0) != setup_time:
         return None, message or "Exact closed-15M setup candle is unavailable"
     if len(history) < max(minimum, lookback):
-        return None, "Not enough closed 15M history for the existing structural plan"
+        return None, "Not enough closed 15M history for the structural plan"
     return _PRICE_PLAN(history, side, minimum_rr, lookback)
 
 
@@ -270,7 +294,7 @@ def _wallet_snapshot(core: Any) -> dict[str, Any]:
     }
 
 
-def _blocked(
+def _wait(
     candidate: Mapping[str, Any],
     *,
     code: str,
@@ -280,7 +304,7 @@ def _blocked(
 ) -> tuple[dict[str, Any], None, float]:
     row = {
         **dict(candidate),
-        "positionSizingStatus": "SIZING_BLOCKED",
+        "positionSizingStatus": "SIZING_WAIT",
         "sizingPolicyId": POLICY_ID,
         "sizingDecisionAt": timestamp,
         "sizingApproved": False,
@@ -289,11 +313,32 @@ def _blocked(
             "code": code,
             "reason": reason,
             "checks": dict(checks),
+            "tradeRejected": False,
+            "retryable": True,
         },
-        "executionStatus": "BLOCKED_BY_SIZING",
+        "executionStatus": "AWAITING_SIZING_DATA",
         "orderSubmitted": False,
+        "tradeRejected": False,
     }
     return row, None, 0.0
+
+
+# Backward-compatible private name; semantics are intentionally non-blocking.
+def _blocked(
+    candidate: Mapping[str, Any],
+    *,
+    code: str,
+    reason: str,
+    checks: Mapping[str, Any],
+    timestamp: int,
+) -> tuple[dict[str, Any], None, float]:
+    return _wait(
+        candidate,
+        code=code,
+        reason=reason,
+        checks=checks,
+        timestamp=timestamp,
+    )
 
 
 def _evaluate_candidate(
@@ -319,20 +364,20 @@ def _evaluate_candidate(
         or entry <= 0
         or item.get("orderSubmitted") is not False
     ):
-        return _blocked(
+        return _wait(
             item,
-            code="INVALID_RISK_APPROVED_CANDIDATE",
-            reason="Risk-approved candidate identity or entry state is invalid",
+            code="SIZING_INPUT_NOT_READY",
+            reason="Risk-approved candidate identity or entry state is incomplete",
             checks=checks,
             timestamp=timestamp,
         )
 
     grade_risk_pct = GRADE_RISK_PCT.get(grade)
     if grade_risk_pct is None:
-        return _blocked(
+        return _wait(
             item,
-            code="GRADE_RISK_BLOCKED",
-            reason="Automatic sizing allows A+ and A at 1.00%; B+ is rejected",
+            code="UPSTREAM_RISK_GRADE_MISMATCH",
+            reason="Sizing received a grade that should have been resolved by Risk; eligibility is not changed here",
             checks=checks,
             timestamp=timestamp,
         )
@@ -341,13 +386,13 @@ def _evaluate_candidate(
     checks["technicalPlan"] = {
         "ok": plan is not None,
         "reason": plan_reason,
-        "source": "setup_worker._price_plan",
+        "source": "upstream_or_setup_worker_structural_plan",
         "setupFifteenMinuteCandleTime": item.get("setupFifteenMinuteCandleTime"),
     }
     if plan is None:
-        return _blocked(
+        return _wait(
             item,
-            code="TECHNICAL_STOP_UNAVAILABLE",
+            code="TECHNICAL_PLAN_WAIT",
             reason=plan_reason,
             checks=checks,
             timestamp=timestamp,
@@ -368,27 +413,19 @@ def _evaluate_candidate(
             "takeValidForEntry": take_valid,
         }
     )
-    if not stop_valid:
-        return _blocked(
+    if not stop_valid or not take_valid:
+        return _wait(
             item,
-            code="INVALID_TECHNICAL_STOP",
-            reason="Existing structural stop is missing or not on the risk side of the closed-5M entry",
-            checks=checks,
-            timestamp=timestamp,
-        )
-    if not take_valid:
-        return _blocked(
-            item,
-            code="INVALID_TECHNICAL_TARGET",
-            reason="Existing structural target is not on the reward side of the closed-5M entry",
+            code="TECHNICAL_PLAN_WAIT",
+            reason="Structural SL/TP is not executable for the current closed-5M entry",
             checks=checks,
             timestamp=timestamp,
         )
 
     if not wallet.get("ok"):
-        return _blocked(
+        return _wait(
             item,
-            code="WALLET_MARGIN_UNAVAILABLE",
+            code="WALLET_DATA_WAIT",
             reason=str(wallet.get("reason") or "Wallet margin data unavailable"),
             checks=checks,
             timestamp=timestamp,
@@ -400,19 +437,19 @@ def _evaluate_candidate(
     risk_factor = max(0.0, min(1.0, _number(item.get("riskSizeFactor"), 1.0)))
     effective_risk_pct = grade_risk_pct * risk_factor
     if effective_risk_pct <= 0:
-        return _blocked(
+        return _wait(
             item,
-            code="RISK_SIZE_FACTOR_BLOCKED",
-            reason="Existing authoritative risk size factor is zero",
+            code="RISK_SIZE_FACTOR_WAIT",
+            reason="Authoritative risk size factor is zero; wait for a non-zero risk allocation",
             checks=checks,
             timestamp=timestamp,
         )
 
     stop_distance = abs(entry - stop)
     if stop_distance <= 0:
-        return _blocked(
+        return _wait(
             item,
-            code="INVALID_TECHNICAL_STOP",
+            code="TECHNICAL_PLAN_WAIT",
             reason="Structural stop distance is zero",
             checks=checks,
             timestamp=timestamp,
@@ -447,19 +484,19 @@ def _evaluate_candidate(
         "fixedFreeReserveGateEnabled": False,
     }
     if raw_qty <= 0:
-        return _blocked(
+        return _wait(
             item,
-            code="AVAILABLE_MARGIN_EXHAUSTED",
-            reason="No real available margin remains for the risk-sized position",
+            code="AVAILABLE_MARGIN_WAIT",
+            reason="No real available margin currently remains for this risk-sized position",
             checks=checks,
             timestamp=timestamp,
         )
 
     rules = core.get_instrument_rules(symbol)
     if not isinstance(rules, dict) or not rules.get("ok"):
-        return _blocked(
+        return _wait(
             item,
-            code="INSTRUMENT_RULES_UNAVAILABLE",
+            code="INSTRUMENT_RULES_WAIT",
             reason=str((rules or {}).get("reason") or "Bybit instrument rules unavailable"),
             checks=checks,
             timestamp=timestamp,
@@ -469,6 +506,15 @@ def _evaluate_candidate(
     min_qty = Decimal(str(rules.get("minOrderQty") or "0"))
     max_qty = Decimal(str(rules.get("maxOrderQty") or "0"))
     min_notional = Decimal(str(rules.get("minNotionalValue") or "0"))
+    if qty_step <= 0:
+        return _wait(
+            item,
+            code="INSTRUMENT_RULES_WAIT",
+            reason="Bybit quantity step is unavailable",
+            checks=checks,
+            timestamp=timestamp,
+        )
+
     qty = core.floor_to_step(Decimal(str(raw_qty)), qty_step)
     if max_qty > 0:
         qty = min(qty, max_qty)
@@ -508,47 +554,48 @@ def _evaluate_candidate(
     }
 
     if invalid_rules:
-        return _blocked(
+        return _wait(
             item,
-            code="BYBIT_QUANTITY_RULE_BLOCKED",
-            reason="Risk-sized quantity does not meet Bybit quantity or min-notional rules",
+            code="BYBIT_ORDER_RULE_WAIT",
+            reason="Calculated quantity cannot currently satisfy Bybit quantity/min-notional rules within approved risk",
             checks=checks,
             timestamp=timestamp,
         )
     if risk_or_available_violation:
-        return _blocked(
+        return _wait(
             item,
-            code="RISK_OR_AVAILABLE_MARGIN_BLOCKED",
-            reason="Rounded quantity exceeds approved risk or real available margin",
+            code="RISK_OR_MARGIN_RECALC_WAIT",
+            reason="Rounded quantity needs recalculation within approved risk and real available margin",
             checks=checks,
             timestamp=timestamp,
         )
 
     stop_pct = (stop_distance / entry) * 100.0
     take_pct = (abs(original_take - entry) / entry) * 100.0
-    market_cost = cost_policy_fix._market_cost(core, symbol, intraday_scanner)
-    cost_gate = cost_policy_fix.evaluate_cost_policy(
-        stop_pct=stop_pct,
-        take_pct=take_pct,
-        market_cost=market_cost,
-        scanner_module=intraday_scanner,
-        notional=float(notional),
-        risk_amount=actual_risk,
-    )
-    checks["costAndNetRr"] = dict(cost_gate)
-    if not cost_gate.get("ok"):
-        return _blocked(
-            item,
-            code=str(cost_gate.get("blockCode") or "COST_NET_RR_BLOCKED"),
-            reason=str(cost_gate.get("reason") or "Existing cost/net-RR policy blocked sizing"),
-            checks=checks,
-            timestamp=timestamp,
+    try:
+        market_cost = cost_policy_fix._market_cost(core, symbol, intraday_scanner)
+        cost_gate = cost_policy_fix.evaluate_cost_policy(
+            stop_pct=stop_pct,
+            take_pct=take_pct,
+            market_cost=market_cost,
+            scanner_module=intraday_scanner,
+            notional=float(notional),
+            risk_amount=actual_risk,
         )
+    except Exception as exc:
+        cost_gate = {"ok": False, "reason": f"Cost estimate unavailable: {exc}"}
 
-    adjusted_take_pct = _number(cost_gate.get("adjustedTakeProfitPct"), take_pct)
-    adjusted_distance = entry * (adjusted_take_pct / 100.0)
-    adjusted_take = entry + adjusted_distance if side == "Buy" else entry - adjusted_distance
-    risk_reward = adjusted_take_pct / stop_pct if stop_pct > 0 else 0.0
+    # Cost/net-RR is informational in sizing. Trade eligibility was already decided
+    # by Risk; sizing must not create a second rejection gate.
+    checks["costAndNetRr"] = {**dict(cost_gate), "sizingGate": False}
+    adjusted_take = original_take
+    adjusted_take_pct = _number(cost_gate.get("adjustedTakeProfitPct"), 0.0)
+    if adjusted_take_pct > 0:
+        adjusted_distance = entry * (adjusted_take_pct / 100.0)
+        candidate_take = entry + adjusted_distance if side == "Buy" else entry - adjusted_distance
+        if (side == "Buy" and candidate_take > entry) or (side == "Sell" and candidate_take < entry):
+            adjusted_take = candidate_take
+    risk_reward = abs(adjusted_take - entry) / stop_distance if stop_distance > 0 else 0.0
 
     approved = {
         **item,
@@ -559,8 +606,9 @@ def _evaluate_candidate(
         "sizingDecision": {
             "ok": True,
             "code": "SIZING_APPROVED",
-            "reason": "Technical-stop risk sizing approved under locked Isolated max-10x policy",
+            "reason": "Risk-approved trade sized for Node execution; sizing is not a rejection authority",
             "checks": checks,
+            "tradeRejected": False,
         },
         "qualityGrade": grade,
         "gradeRiskPct": grade_risk_pct,
@@ -569,11 +617,11 @@ def _evaluate_candidate(
         "actualStopRiskUsdt": round(actual_risk, 8),
         "entryReference": round(entry, 12),
         "technicalStopLoss": round(stop, 12),
-        "technicalStopSource": "EXISTING_CLOSED_15M_STRUCTURE_PLAN",
+        "technicalStopSource": "CLOSED_15M_STRUCTURE_OR_UPSTREAM_PLAN",
         "originalTakeProfitReference": round(original_take, 12),
         "takeProfitReference": round(adjusted_take, 12),
         "riskReward": round(risk_reward, 4),
-        "costGate": dict(cost_gate),
+        "costGate": {**dict(cost_gate), "sizingGate": False},
         "qty": core.format_qty(qty),
         "rawRiskQty": core.format_qty(Decimal(str(raw_risk_qty))),
         "rawMarginCappedQty": core.format_qty(Decimal(str(raw_qty))),
@@ -592,11 +640,13 @@ def _evaluate_candidate(
         "nodeExecutionRequirements": {
             "marginMode": MARGIN_MODE,
             "leverage": int(LEVERAGE),
+            "maximumLeverage": int(LEVERAGE),
             "revalidateWalletAndInstrumentRules": True,
             "submitOnlyAfterRevalidation": True,
         },
         "executionStatus": "AWAITING_NODE_EXECUTION",
         "orderSubmitted": False,
+        "tradeRejected": False,
     }
     return dict(approved), dict(approved), required_margin
 
@@ -637,11 +687,14 @@ def build(
                 approved.append(approved_candidate)
                 reserved_margin += margin
 
+        waiting = len(rows) - len(approved)
         metrics = {
             "approvedRiskInput": len(queue),
             "evaluated": len(rows),
             "approved": len(approved),
-            "blocked": len(rows) - len(approved),
+            "waiting": waiting,
+            "blocked": 0,
+            "tradeRejections": 0,
             "technicalPlanChecks": len(rows),
             "walletChecks": 1 if queue else 0,
             "instrumentRuleChecks": sum(
@@ -652,16 +705,17 @@ def build(
             "marginReduced": sum(1 for row in approved if row.get("marginReducedQuantity")),
             "reservedInitialMarginUsdt": round(reserved_margin, 8),
             "orderSubmissions": 0,
-            "automaticRiskPolicy": "A_PLUS_1_PERCENT_A_1_PERCENT_B_PLUS_REJECT",
+            "automaticRiskPolicy": "A_PLUS_1_PERCENT_A_1_PERCENT_B_PLUS_REJECT_AT_RISK",
             "manualDemoRiskPolicyChanged": False,
             "marginPolicy": "ISOLATED_MAX_10X_AVAILABLE_MARGIN_ONLY_NO_FIXED_25_60_40_GATES",
+            "sizingPolicy": "CALCULATOR_ONLY_NON_REJECTION",
         }
         fingerprint = _fingerprint(source)
         payload = {
             "status": "ready" if rows else "empty",
-            "version": 2,
+            "version": 3,
             "policyId": POLICY_ID,
-            "source": "authoritative_risk_existing_technical_plan",
+            "source": "risk_approved_non_rejecting_sizing",
             "fiveMinuteCandleTime": source.get("fiveMinuteCandleTime"),
             "inputFingerprint": fingerprint,
             "updatedAt": timestamp,
@@ -671,6 +725,8 @@ def build(
             "lastError": None,
             "persisted": False,
         }
+        # Persistence is support infrastructure only; failure does not change the
+        # sizing result or trade eligibility.
         payload["persisted"] = _persist(payload)
         with _STATE_LOCK:
             _STATE.update(payload)
@@ -723,9 +779,10 @@ def status(core: Any | None = None) -> dict[str, Any]:
         "installed": bool(core is not None and getattr(core, "_position_sizing_margin_v1_installed", False)),
         "policyId": POLICY_ID,
         "automaticGradeRiskPct": dict(GRADE_RISK_PCT),
-        "bPlusRejected": True,
+        "bPlusRejectedBySizing": False,
+        "riskOwnsGradeRejection": True,
         "manualDemoRiskChanged": False,
-        "technicalStopSource": "setup_worker._price_plan",
+        "technicalStopSource": "upstream_or_setup_worker_structural_plan",
         "marginMode": MARGIN_MODE,
         "leverage": int(LEVERAGE),
         "maximumLeverage": int(LEVERAGE),
@@ -735,6 +792,8 @@ def status(core: Any | None = None) -> dict[str, Any]:
         "perTradeMarginCapPct": None,
         "combinedMarginCapPct": None,
         "minimumFreeMarginReservePct": None,
+        "tradeRejectionAuthority": False,
+        "costNetRrIsSizingGate": False,
         "submitsOrder": False,
         "snapshot": snapshot(),
     }
@@ -746,9 +805,9 @@ def _reset_for_tests() -> None:
         _STATE.update(
             {
                 "status": "idle",
-                "version": 2,
+                "version": 3,
                 "policyId": POLICY_ID,
-                "source": "authoritative_risk_existing_technical_plan",
+                "source": "risk_approved_non_rejecting_sizing",
                 "fiveMinuteCandleTime": None,
                 "inputFingerprint": None,
                 "updatedAt": 0,

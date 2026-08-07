@@ -209,6 +209,7 @@ def test_a_plus_uses_one_percent_risk_and_isolated_max_10x():
     assert approved["technicalStopLoss"] == 99.0
     assert approved["takeProfitReference"] == 102.25
     assert approved["orderSubmitted"] is False
+    assert approved["tradeRejected"] is False
     assert approved["marginCaps"] == {
         "fixedPerTradeEnabled": False,
         "fixedCombinedEnabled": False,
@@ -231,26 +232,32 @@ def test_a_grade_uses_one_percent_risk():
     assert approved["requiredInitialMarginUsdt"] == 100.0
 
 
-def test_b_plus_is_rejected_even_if_upstream_is_malformed_as_approved():
+def test_unexpected_b_plus_does_not_create_a_sizing_rejection():
     core = CoreStub(candidate(grade="B+"))
     sizing.install(core, setup_worker)
 
     result = sizing.build(core, now=5000)
 
     assert result["approvedSizingQueueSize"] == 0
-    assert result["rows"][0]["sizingDecision"]["code"] == "GRADE_RISK_BLOCKED"
+    row = result["rows"][0]
+    assert row["positionSizingStatus"] == "SIZING_WAIT"
+    assert row["tradeRejected"] is False
+    assert row["sizingDecision"]["code"] == "UPSTREAM_RISK_GRADE_MISMATCH"
+    assert result["metrics"]["blocked"] == 0
+    assert result["metrics"]["tradeRejections"] == 0
 
 
-def test_invalid_structural_stop_is_blocked_without_fixed_percent_fallback():
+def test_invalid_structural_stop_waits_without_rejecting_trade():
     core = CoreStub(candidate(entryReference=98.0))
     sizing.install(core, setup_worker)
 
     result = sizing.build(core, now=5000)
 
     row = result["rows"][0]
-    assert row["sizingDecision"]["code"] == "INVALID_TECHNICAL_STOP"
+    assert row["positionSizingStatus"] == "SIZING_WAIT"
+    assert row["tradeRejected"] is False
+    assert row["sizingDecision"]["code"] == "TECHNICAL_PLAN_WAIT"
     assert result["approvedSizingQueueSize"] == 0
-    assert "fixed" not in row["sizingDecision"]["reason"].lower()
 
 
 def test_no_fixed_25_percent_margin_cap_reduces_valid_risk_sizing():
@@ -296,7 +303,7 @@ def test_real_available_margin_can_reduce_quantity_before_exchange_submission():
     assert core.order_calls == 0
 
 
-def test_bybit_min_notional_blocks_too_small_available_margin_quantity():
+def test_bybit_min_notional_waits_instead_of_rejecting_trade():
     core = CoreStub()
     core.wallet["result"]["list"][0]["totalAvailableBalance"] = "1"
     core.rules["minNotionalValue"] = Decimal("100")
@@ -305,10 +312,13 @@ def test_bybit_min_notional_blocks_too_small_available_margin_quantity():
     result = sizing.build(core, now=5000)
 
     assert result["approvedSizingQueueSize"] == 0
-    assert result["rows"][0]["sizingDecision"]["code"] == "BYBIT_QUANTITY_RULE_BLOCKED"
+    row = result["rows"][0]
+    assert row["positionSizingStatus"] == "SIZING_WAIT"
+    assert row["tradeRejected"] is False
+    assert row["sizingDecision"]["code"] == "BYBIT_ORDER_RULE_WAIT"
 
 
-def test_existing_cost_policy_can_block_sizing(monkeypatch):
+def test_cost_policy_is_informational_and_cannot_reject_sizing(monkeypatch):
     core = CoreStub()
     monkeypatch.setattr(
         sizing.cost_policy_fix,
@@ -317,18 +327,22 @@ def test_existing_cost_policy_can_block_sizing(monkeypatch):
             **dict(kwargs["market_cost"]),
             "ok": False,
             "blockCode": "BLOCKED_NET_RR",
-            "reason": "Net RR below existing minimum",
+            "reason": "Net RR below old sizing minimum",
         },
     )
     sizing.install(core, setup_worker)
 
     result = sizing.build(core, now=5000)
 
-    assert result["approvedSizingQueueSize"] == 0
-    assert result["rows"][0]["sizingDecision"]["code"] == "BLOCKED_NET_RR"
+    assert result["approvedSizingQueueSize"] == 1
+    approved = result["approvedSizingQueue"][0]
+    assert approved["positionSizingStatus"] == "SIZING_APPROVED"
+    assert approved["tradeRejected"] is False
+    assert approved["costGate"]["sizingGate"] is False
+    assert approved["costGate"]["ok"] is False
 
 
-def test_status_exposes_locked_policy_without_legacy_margin_caps():
+def test_status_exposes_non_rejecting_locked_policy_without_legacy_margin_caps():
     core = CoreStub()
     status = sizing.install(core, setup_worker)
 
@@ -340,6 +354,9 @@ def test_status_exposes_locked_policy_without_legacy_margin_caps():
     assert status["perTradeMarginCapPct"] is None
     assert status["combinedMarginCapPct"] is None
     assert status["minimumFreeMarginReservePct"] is None
+    assert status["tradeRejectionAuthority"] is False
+    assert status["costNetRrIsSizingGate"] is False
+    assert status["riskOwnsGradeRejection"] is True
 
 
 def test_same_input_is_idempotent_and_persisted_across_restart():
