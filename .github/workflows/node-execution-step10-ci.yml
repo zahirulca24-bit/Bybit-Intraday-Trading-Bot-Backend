@@ -39,7 +39,7 @@ jobs:
         working-directory: node_execution
         run: npm test
 
-      - name: Verify demo-only and fail-closed boundaries
+      - name: Verify demo-only and operator-controlled execution boundaries
         working-directory: node_execution
         run: |
           node - <<'JS'
@@ -48,7 +48,7 @@ jobs:
           const source = files.map((file) => fs.readFileSync(file, 'utf8')).join('\n');
           if (source.includes('https://api.bybit.com')) throw new Error('Production Bybit endpoint is forbidden');
           if (!source.includes('https://api-demo.bybit.com')) throw new Error('Demo endpoint lock missing');
-          if (!source.includes("NODE_EXECUTION_ENABLED || 'false'")) throw new Error('Fail-closed execution default missing');
+          if (!source.includes("NODE_EXECUTION_ENABLED || 'true'")) throw new Error('Operator-controlled execution default missing');
           if (!source.includes("server.listen(port, '0.0.0.0'")) throw new Error('Cloud Run PORT listener missing');
           JS
 
