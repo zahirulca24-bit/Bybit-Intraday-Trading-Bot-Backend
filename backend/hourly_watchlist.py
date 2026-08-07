@@ -1,10 +1,10 @@
 """Persistent closed-1H Top-20 watchlist from directly eligible USDT contracts.
 
-This module is the canonical scan entry point for the strategy pipeline. It does
-not depend on Daily/1D or 4H directional stages. Eligible Bybit USDT linear
-contracts are filtered by price, turnover and spread, then classified from the
-latest fully closed 1H candle set using the existing worker trend classifier and
-ranking formula. The resulting Top-20 feeds the existing closed-15M setup stage.
+This module is the canonical scan entry point for the strategy pipeline. Eligible
+Bybit USDT linear contracts are filtered by price, turnover and spread, then
+classified from the latest fully closed 1H candle set using the existing worker
+trend classifier and ranking formula. The resulting Top-20 feeds the existing
+closed-15M setup stage.
 """
 
 from __future__ import annotations
@@ -302,8 +302,6 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             "bullish": sum(1 for row in selected if row.get("trend") == "BULLISH"),
             "bearish": sum(1 for row in selected if row.get("trend") == "BEARISH"),
             "upstreamTimeframes": ["1H"],
-            "dailyGateRequired": False,
-            "fourHourGateRequired": False,
             "rankingPolicy": "existing_worker_rank_rows",
             "marketRejected": market_rejected,
             "rejected": rejected,
@@ -379,8 +377,6 @@ def status(worker_module: Any | None = None) -> dict[str, Any]:
     return {
         "installed": installed,
         "policy": "ELIGIBLE_USDT_TO_CLOSED_1H_TOP20",
-        "dailyGateRequired": False,
-        "fourHourGateRequired": False,
         "snapshot": snapshot(),
     }
 

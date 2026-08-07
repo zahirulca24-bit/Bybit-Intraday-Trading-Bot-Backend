@@ -275,9 +275,6 @@ def run_due_once(
                     _STATE.get("commandPublishRuns") or 0
                 ) + 1
 
-        # Deliberate cutover: do not call setup_worker.run_batch() and do not
-        # call execution_handoff.run_once(). Python may publish immutable
-        # commands, but Node.js owns future claim and order execution.
         with _LOCK:
             _STATE["legacySetupWorkerDisabled"] = True
             _STATE["legacyPythonExecutionDisabled"] = True
@@ -306,46 +303,6 @@ def _loop(
     with _LOCK:
         _STATE["status"] = "stopped"
         _STATE["stoppedAt"] = int(time.time())
-
-
-def _install_daily_universe(core: Any, symbol_worker: Any) -> None:
-    try:
-        from . import daily_universe
-    except ImportError:
-        import daily_universe
-    daily_universe.install(core, symbol_worker)
-
-
-def _daily_universe_status() -> dict[str, Any]:
-    try:
-        from . import daily_universe
-    except ImportError:
-        try:
-            import daily_universe
-        except ImportError:
-            return {"installed": False, "status": "unavailable"}
-    return daily_universe.snapshot()
-
-
-def _install_four_hour_directional_pool(
-    core: Any, symbol_worker: Any
-) -> None:
-    try:
-        from . import four_hour_directional_pool
-    except ImportError:
-        import four_hour_directional_pool
-    four_hour_directional_pool.install(core, symbol_worker)
-
-
-def _four_hour_directional_pool_status() -> dict[str, Any]:
-    try:
-        from . import four_hour_directional_pool
-    except ImportError:
-        try:
-            import four_hour_directional_pool
-        except ImportError:
-            return {"installed": False, "status": "unavailable"}
-    return four_hour_directional_pool.snapshot()
 
 
 def _install_hourly_watchlist(core: Any, symbol_worker: Any) -> None:
@@ -526,10 +483,8 @@ def start(
     setup_worker: Any,
     execution_handoff: Any | None = None,
 ) -> dict[str, Any]:
-    """Start one scanner scheduler with Python automatic entries disabled."""
+    """Start the canonical 1H -> 15M -> 5M scanner scheduler."""
     global _THREAD
-    _install_daily_universe(core, symbol_worker)
-    _install_four_hour_directional_pool(core, symbol_worker)
     _install_hourly_watchlist(core, symbol_worker)
     _install_issue1_policy(core)
     _install_strategy_step1(core)
@@ -600,8 +555,6 @@ def snapshot_unlocked(core: Any | None = None) -> dict[str, Any]:
         "backoffActive": backoff_active,
         "threadAlive": bool(_THREAD is not None and _THREAD.is_alive()),
         "settings": settings(),
-        "dailyUniverse": _daily_universe_status(),
-        "fourHourDirectionalPool": _four_hour_directional_pool_status(),
         "hourlyWatchlist": _hourly_watchlist_status(),
         "fifteenMinuteStrategyClassification": (
             _fifteen_minute_strategy_classifier_status()

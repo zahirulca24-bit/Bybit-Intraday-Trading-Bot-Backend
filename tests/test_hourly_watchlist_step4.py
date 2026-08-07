@@ -106,17 +106,13 @@ class HourlyWatchlistTests(unittest.TestCase):
         self.assertEqual(result["metrics"]["eligibleMarketInput"], 25)
         self.assertEqual(result["metrics"]["oneHourQualified"], 25)
         self.assertEqual(result["metrics"]["selected"], 20)
-        self.assertFalse(result["metrics"]["dailyGateRequired"])
-        self.assertFalse(result["metrics"]["fourHourGateRequired"])
         self.assertEqual(result["metrics"]["upstreamTimeframes"], ["1H"])
         self.assertEqual(result["source"], "eligible_usdt_closed_1h_top20")
         self.assertTrue(result["persisted"])
 
-    def test_no_daily_or_four_hour_core_dependency(self):
+    def test_market_source_requires_no_parent_timeframe_stage(self):
         now = int(datetime(2026, 8, 3, 11, 5, tzinfo=timezone.utc).timestamp())
         core = FakeCore(now)
-        self.assertFalse(hasattr(core, "daily_master_universe"))
-        self.assertFalse(hasattr(core, "four_hour_directional_pool"))
         worker = fresh_worker()
         hourly_watchlist.install(core, worker)
         result = hourly_watchlist.build(core, now=now)
