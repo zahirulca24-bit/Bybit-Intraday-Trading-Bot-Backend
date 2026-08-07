@@ -4,6 +4,14 @@ function list(response) {
   return Array.isArray(response?.result?.list) ? response.result.list : [];
 }
 
+function approvedLeverage(payload) {
+  const leverage = Number(payload?.leverage);
+  if (!Number.isFinite(leverage) || leverage <= 0 || leverage > 10) {
+    throw new Error('Execution leverage must be positive and no greater than 10x');
+  }
+  return leverage;
+}
+
 export function validateContract(payload, candidateKey = payload?.candidateKey) {
   if (!payload || payload.positionSizingStatus !== 'SIZING_APPROVED' || payload.sizingApproved !== true) {
     throw new Error('Command is not Step-8 sizing approved');
@@ -11,13 +19,18 @@ export function validateContract(payload, candidateKey = payload?.candidateKey) 
   if (payload.executionStatus !== 'AWAITING_NODE_EXECUTION' || payload.orderSubmitted !== false) {
     throw new Error('Command execution state is invalid');
   }
-  if (payload.marginMode !== 'ISOLATED' || Number(payload.leverage) !== 5) {
-    throw new Error('Only Isolated 5x is approved');
+  if (payload.marginMode !== 'ISOLATED') {
+    throw new Error('Only Isolated margin is approved');
   }
+  const leverage = approvedLeverage(payload);
   const requirements = payload.nodeExecutionRequirements || {};
+  const requiredLeverage = Number(requirements.leverage);
   if (
     requirements.marginMode !== 'ISOLATED'
-    || Number(requirements.leverage) !== 5
+    || !Number.isFinite(requiredLeverage)
+    || requiredLeverage <= 0
+    || requiredLeverage > 10
+    || requiredLeverage !== leverage
     || requirements.revalidateWalletAndInstrumentRules !== true
     || requirements.submitOnlyAfterRevalidation !== true
   ) {
@@ -69,7 +82,7 @@ export function revalidateLive(payload, truth, config, nowSeconds = Math.floor(D
   if (lot.minOrderQty && !decimalGte(qty, lot.minOrderQty)) throw new Error('Quantity is below current Bybit minimum');
   const maxMarket = lot.maxMktOrderQty || lot.maxMarketOrderQty || lot.maxOrderQty;
   if (maxMarket && !decimalLte(qty, maxMarket)) throw new Error('Quantity exceeds current Bybit market maximum');
-  if (Number(leverageFilter.maxLeverage || 0) < config.leverage) throw new Error('Instrument no longer supports approved 5x leverage');
+  if (Number(leverageFilter.maxLeverage || 0) < config.leverage) throw new Error('Instrument no longer supports configured 10x maximum leverage');
 
   const mark = positiveNumber(ticker.markPrice || ticker.lastPrice, 'markPrice');
   const notional = qtyNumber * mark;
@@ -90,7 +103,7 @@ export function revalidateLive(payload, truth, config, nowSeconds = Math.floor(D
 
   const positions = list(truth.positions).filter((row) => Number(row.size || 0) > 0);
   if (positions.some((row) => String(row.symbol) === payload.symbol)) throw new Error('Existing symbol position blocks duplicate execution');
-  if (positions.length >= 3) throw new Error('Maximum three open positions already reached');
+  if (positions.length >= config.maxActiveTrades) throw new Error('Maximum three open positions already reached');
   const activeOrders = list(truth.activeOrders).filter((row) => {
     const status = String(row.orderStatus || '');
     return ['New', 'PartiallyFilled', 'Untriggered'].includes(status)
@@ -101,16 +114,12 @@ export function revalidateLive(payload, truth, config, nowSeconds = Math.floor(D
   const pendingReserve = Number(truth.pendingReservedMargin || 0);
   if (!Number.isFinite(pendingReserve) || pendingReserve < 0) throw new Error('Pending reserved margin truth is invalid');
   const requiredMargin = notional / config.leverage;
-  const perTradeCap = equity * 0.25;
-  const combinedCap = equity * 0.60;
-  const freeReserve = equity * 0.40;
+  const remainingAvailable = Math.max(0, available - pendingReserve);
+  if (requiredMargin > remainingAvailable + 1e-8) {
+    throw new Error('Available margin is insufficient after pending reservations');
+  }
   const projectedInitial = currentInitial + pendingReserve + requiredMargin;
   const projectedFree = equity - projectedInitial;
-  if (requiredMargin > perTradeCap + 1e-8) throw new Error('Per-trade 25% margin cap violated');
-  if (requiredMargin > Math.max(0, available - pendingReserve) + 1e-8) throw new Error('Available margin is insufficient after pending reservations');
-  if (projectedInitial > combinedCap + 1e-8 || projectedFree + 1e-8 < freeReserve) {
-    throw new Error('Combined 60% margin cap or 40% free reserve violated');
-  }
 
   return {
     equity,
