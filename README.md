@@ -1,8 +1,17 @@
 # Bybit Intraday Trading Bot — Backend
 
-Backend for a **Bybit Demo-only** intraday trading system. Python owns scanning, signal preparation, risk and sizing. Node.js owns order execution, fill verification and trade management. PostgreSQL is the shared durable source of truth.
+Backend for a **Bybit Demo-only** intraday trading system. Python owns scanning, signal preparation, risk and sizing. Node.js owns execution and the complete trade lifecycle. PostgreSQL and journal services remain enabled as support infrastructure.
 
 > Real-money trading is unsupported. Both runtimes are locked to `https://api-demo.bybit.com`.
+
+## Locked trading plan
+
+**Status:** LOCKED  
+**Date:** 08 August 2026  
+**Day:** Saturday  
+**Time:** 02:09 AM Bangladesh Time (UTC+6)
+
+This plan must not be changed silently. Any later change requires verified evidence, a blocker, or explicit owner approval.
 
 ## Canonical pipeline
 
@@ -15,46 +24,103 @@ Closed 15M setup classification
         ↓
 Closed 5M confirmation
         ↓
+5M candle must close in trade direction / valid confirmation
+        ↓
 Signal Ready
         ↓
-Authoritative risk approval
+Authoritative Risk
         ↓
-Position sizing + margin validation
+Sizing
         ↓
-PostgreSQL execution_commands outbox
+PostgreSQL Outbox / Journal support
         ↓
-Node slot claim
-        ↓
-Final exchange/account validation
+Node execution slot
         ↓
 Bybit Demo order
         ↓
-Active trade management
+Full worker-managed trade lifecycle
         ↓
 CLOSED
 ```
 
-The scanner entry timeframe is **1H**. Setup confirmation uses **15M**, and entry confirmation uses **5M**.
+The scanner entry path is strictly **1H → 15M → 5M closed candle**. No 1D or 4H scanner dependency is part of the locked flow.
 
 ## Trading policy
 
-| Area | Policy |
+| Area | Locked policy |
 |---|---|
 | Exchange | Bybit Demo only |
 | Product | USDT linear derivatives |
 | Margin mode | Isolated |
-| Leverage | 5x |
+| Maximum leverage | 10x |
 | Maximum active trades | 3 |
+| Execution workers / slots | 3 |
 | A+ risk | 1.00% |
-| A risk | 0.75% |
+| A risk | 1.00% |
 | B+ | Rejected for automatic execution |
-| Per-trade margin cap | 25% of equity |
-| Combined margin cap | 60% of equity |
-| Minimum free reserve | 40% of equity |
-| Minimum gross risk-reward | 1:2 |
+| Entry confirmation | Closed 5M candle must validate the trade direction/setup |
+| Position size | Calculated from approved risk, stop distance and exchange rules |
+| Fixed per-trade 25% margin gate | Not part of the locked trade-eligibility rule |
+| Fixed combined 60% margin gate | Not part of the locked trade-eligibility rule |
+| Fixed 40% free-margin gate | Not part of the locked trade-eligibility rule |
 | Python order submission | Disabled |
-| Node order execution | Operator controlled |
+| Node order execution | Enabled/controlled by operator runtime |
 | Real-money use | Prohibited |
+
+**10x is a maximum leverage capability, not a requirement to use full 10x exposure on every trade.** The execution path uses the approved 1% risk and stop distance to determine required notional and margin.
+
+## Risk and sizing authority
+
+Risk and Sizing are the trade-eligibility authorities.
+
+- A+ and A both use **1% risk**.
+- Sizing uses the approved risk, entry price, structural stop distance and Bybit quantity/instrument rules.
+- Leverage may be used up to **10x Isolated** to reduce required margin for the approved notional.
+- A trade must not be rejected only because journal or support persistence is temporarily degraded.
+
+## PostgreSQL Outbox and Journal
+
+PostgreSQL Outbox and Journal remain **ON**.
+
+They are support infrastructure, not independent strategy/risk rejection gates.
+
+If support persistence or journal sync has a temporary problem, the candidate must not be marked as a permanent strategy/risk rejection solely for that reason. Use operational states such as `WAIT`, `RETRY` or `DEGRADED` and preserve reconciliation data where available.
+
+Journal data may be reconciled from Bybit Demo order, fill, position and closed-PnL truth.
+
+## Node execution workers
+
+There are **3 execution slots/workers**, matching the maximum of **3 active trades**.
+
+Each worker owns one trade from entry through final close:
+
+```text
+ENTRY DECISION
+  → ORDER SUBMIT
+  → FILL CONFIRMATION
+  → INITIAL PROTECTION
+  → ACTIVE MANAGEMENT
+  → PARTIAL TP / BREAK-EVEN / TRAILING / PROTECTION
+  → FULL CLOSE
+  → FINAL RECONCILIATION
+  → SLOT AVAILABLE
+```
+
+The worker manages the **full trade lifecycle**, not only the close.
+
+## Execution state machine
+
+```text
+AVAILABLE
+  → RESERVED
+  → ORDER_PENDING
+  → PARTIALLY_FILLED
+  → MANAGING
+  → CLOSING
+  → CLOSED
+```
+
+Unknown submission outcomes must be reconciled and must not be blindly resubmitted.
 
 ## Python runtime
 
@@ -71,9 +137,8 @@ Python responsibilities:
 - closed 15M setup classification;
 - closed 5M confirmation;
 - authoritative risk approval;
-- position sizing and margin validation;
-- immutable execution-command publication;
-- API, diagnostics, journal and runtime status.
+- position sizing;
+- API, diagnostics and runtime status.
 
 Python must not submit exchange orders.
 
@@ -98,73 +163,15 @@ npm start
 Node responsibilities:
 
 - three persistent execution slots;
-- stable ownership using `NODE_EXECUTION_OWNER_ID`;
-- PostgreSQL advisory leadership;
-- restart recovery;
-- final wallet, instrument, mark-price, quantity, risk and margin validation;
-- Isolated 5x verification;
-- deterministic `orderLinkId`;
+- stable slot ownership;
+- final exchange/account/instrument validation;
+- Isolated leverage up to 10x;
+- deterministic order identity;
 - Bybit Demo order submission;
-- order/fill/protection evidence persistence;
-- partial exits, break-even and runner trailing;
-- manual or exchange-side close reconciliation.
-
-## Execution state machine
-
-```text
-AVAILABLE
-  → RESERVED
-  → ORDER_PENDING
-  → PARTIALLY_FILLED
-  → MANAGING
-  → CLOSING
-  → CLOSED
-```
-
-`FAILED` is terminal. Unknown submission outcomes remain `ORDER_PENDING` for reconciliation and must not be blindly resubmitted.
-
-## Trade management
-
-```text
-TP1: 1.5R → close 40%
-After TP1: move stop to break-even
-TP2: 2.0R → close 30%
-Runner: remaining 30%
-Runner trailing distance: 0.5R
-```
-
-## PostgreSQL durability
-
-Automatic execution requires PostgreSQL. The execution command contract, ownership state, orders, fills and runtime state must survive restart.
-
-Required conditions:
-
-- current migrations;
-- healthy durable state;
-- atomic claims and transitions;
-- one Node execution leader;
-- persistent order/fill evidence.
-
-## Health endpoints
-
-### Python API
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /healthz` | Process liveness |
-| `GET /readyz` | Runtime and dependency readiness |
-| `GET /api/health` | Compatibility liveness |
-| `GET /api/runtime/leadership` | Leader/worker diagnostics |
-| `GET /api/durable-state/status` | Durable-state diagnostics |
-| `GET /api/workers/status` | Worker/execution status |
-
-### Node service
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /healthz` | Container liveness |
-| `GET /readyz` | Execution readiness |
-| `GET /` | Runtime summary |
+- fill verification;
+- protection placement;
+- complete trade management from entry through close;
+- reconciliation after restart or exchange-side state changes.
 
 ## Environment
 
@@ -215,30 +222,17 @@ npm run check
 npm test
 ```
 
-## Deployment topology
-
-```text
-Frontend
-   ↓
-Python Cloud Run API
-   ↓
-PostgreSQL execution outbox and ledgers
-   ↑
-Node Cloud Run execution/management service
-   ↓
-Bybit Demo API
-```
-
 ## Acceptance target
 
 A deployment is accepted only when:
 
-1. Python and Node CI are green.
-2. Both services are healthy and ready.
-3. PostgreSQL migrations and durable state are healthy.
-4. Exactly one Node leader owns at most three execution slots.
-5. The frontend displays canonical backend truth.
-6. One complete Bybit Demo lifecycle reaches `CLOSED` without duplicate submission.
+1. The scanner follows **1H → 15M → closed 5M** only.
+2. Valid A+/A signals use **1% risk**.
+3. Sizing produces a valid exchange quantity from approved risk and structural stop distance.
+4. Up to three Node workers can independently own and manage three active trades.
+5. A worker owns its trade from entry through final close.
+6. Journal/Outbox support faults do not become false strategy/risk rejections.
+7. One complete Bybit Demo lifecycle reaches `CLOSED` without duplicate submission.
 
 ## Repository and services
 
