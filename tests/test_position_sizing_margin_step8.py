@@ -123,7 +123,7 @@ class CoreStub:
         if path == "/v5/account/wallet-balance":
             return dict(self.wallet)
         self.order_calls += 1
-        raise AssertionError("Step 8 must not submit or mutate an exchange order")
+        raise AssertionError("Sizing must not submit or mutate an exchange order")
 
     def public_bybit_get(self, path, params=None):
         return {
@@ -188,7 +188,7 @@ def reset_sizing(monkeypatch):
     sizing._reset_for_tests()
 
 
-def test_a_plus_uses_one_percent_risk_and_isolated_5x():
+def test_a_plus_uses_one_percent_risk_and_isolated_max_10x():
     core = CoreStub()
     original_manual = core.calculate_position_sizing
     sizing.install(core, setup_worker)
@@ -203,27 +203,32 @@ def test_a_plus_uses_one_percent_risk_and_isolated_5x():
     assert approved["riskBudgetUsdt"] == 10.0
     assert approved["qty"] == "10"
     assert approved["notional"] == "1000"
-    assert approved["requiredInitialMarginUsdt"] == 200.0
+    assert approved["requiredInitialMarginUsdt"] == 100.0
     assert approved["marginMode"] == "ISOLATED"
-    assert approved["leverage"] == 5
+    assert approved["leverage"] == 10
     assert approved["technicalStopLoss"] == 99.0
     assert approved["takeProfitReference"] == 102.25
     assert approved["orderSubmitted"] is False
+    assert approved["marginCaps"] == {
+        "fixedPerTradeEnabled": False,
+        "fixedCombinedEnabled": False,
+        "fixedFreeReserveEnabled": False,
+    }
     assert core.calculate_position_sizing == original_manual
     assert core.manual_sizing_calls == 0
     assert core.order_calls == 0
 
 
-def test_a_grade_uses_point_seven_five_percent_risk():
+def test_a_grade_uses_one_percent_risk():
     core = CoreStub(candidate(grade="A"))
     sizing.install(core, setup_worker)
 
     approved = sizing.build(core, now=5000)["approvedSizingQueue"][0]
 
-    assert approved["gradeRiskPct"] == 0.75
-    assert approved["riskBudgetUsdt"] == 7.5
-    assert approved["qty"] == "7.5"
-    assert approved["requiredInitialMarginUsdt"] == 150.0
+    assert approved["gradeRiskPct"] == 1.0
+    assert approved["riskBudgetUsdt"] == 10.0
+    assert approved["qty"] == "10"
+    assert approved["requiredInitialMarginUsdt"] == 100.0
 
 
 def test_b_plus_is_rejected_even_if_upstream_is_malformed_as_approved():
@@ -248,21 +253,21 @@ def test_invalid_structural_stop_is_blocked_without_fixed_percent_fallback():
     assert "fixed" not in row["sizingDecision"]["reason"].lower()
 
 
-def test_per_trade_margin_cap_reduces_quantity_without_widening_stop():
+def test_no_fixed_25_percent_margin_cap_reduces_valid_risk_sizing():
     core = CoreStub(low=99.5, high=100.5)
     sizing.install(core, setup_worker)
 
     approved = sizing.build(core, now=5000)["approvedSizingQueue"][0]
 
     assert approved["technicalStopLoss"] == 99.5
-    assert approved["marginReducedQuantity"] is True
-    assert approved["qty"] == "12.5"
-    assert approved["requiredInitialMarginUsdt"] == 250.0
-    assert approved["actualStopRiskUsdt"] == 6.25
+    assert approved["marginReducedQuantity"] is False
+    assert approved["qty"] == "20"
+    assert approved["requiredInitialMarginUsdt"] == 200.0
+    assert approved["actualStopRiskUsdt"] == 10.0
     assert approved["riskBudgetUsdt"] == 10.0
 
 
-def test_three_candidates_respect_combined_sixty_percent_and_free_forty_percent():
+def test_three_candidates_are_not_limited_by_legacy_60_40_caps():
     rows = [candidate(f"btc-{index}") for index in range(1, 4)]
     core = CoreStub(*rows)
     sizing.install(core, setup_worker)
@@ -270,31 +275,28 @@ def test_three_candidates_respect_combined_sixty_percent_and_free_forty_percent(
     result = sizing.build(core, now=5000)
 
     assert result["approvedSizingQueueSize"] == 3
-    assert result["metrics"]["reservedInitialMarginUsdt"] == 600.0
+    assert result["metrics"]["reservedInitialMarginUsdt"] == 300.0
     third = result["approvedSizingQueue"][2]
-    assert third["projectedTotalInitialMarginUsdt"] == 600.0
-    assert third["projectedFreeMarginUsdt"] == 400.0
-    assert third["marginCaps"] == {
-        "perTradePct": 25.0,
-        "combinedPct": 60.0,
-        "minimumFreeReservePct": 40.0,
-    }
+    assert third["projectedTotalInitialMarginUsdt"] == 300.0
+    assert third["projectedFreeMarginUsdt"] == 700.0
+    assert third["marginCaps"]["fixedCombinedEnabled"] is False
+    assert result["metrics"]["marginPolicy"] == "ISOLATED_MAX_10X_AVAILABLE_MARGIN_ONLY_NO_FIXED_25_60_40_GATES"
 
 
-def test_available_margin_reduces_quantity_before_exchange_submission():
+def test_real_available_margin_can_reduce_quantity_before_exchange_submission():
     core = CoreStub()
-    core.wallet["result"]["list"][0]["totalAvailableBalance"] = "100"
+    core.wallet["result"]["list"][0]["totalAvailableBalance"] = "50"
     sizing.install(core, setup_worker)
 
     approved = sizing.build(core, now=5000)["approvedSizingQueue"][0]
 
     assert approved["qty"] == "5"
-    assert approved["requiredInitialMarginUsdt"] == 100.0
+    assert approved["requiredInitialMarginUsdt"] == 50.0
     assert approved["marginReducedQuantity"] is True
     assert core.order_calls == 0
 
 
-def test_bybit_min_notional_blocks_too_small_margin_capped_quantity():
+def test_bybit_min_notional_blocks_too_small_available_margin_quantity():
     core = CoreStub()
     core.wallet["result"]["list"][0]["totalAvailableBalance"] = "1"
     core.rules["minNotionalValue"] = Decimal("100")
@@ -324,6 +326,20 @@ def test_existing_cost_policy_can_block_sizing(monkeypatch):
 
     assert result["approvedSizingQueueSize"] == 0
     assert result["rows"][0]["sizingDecision"]["code"] == "BLOCKED_NET_RR"
+
+
+def test_status_exposes_locked_policy_without_legacy_margin_caps():
+    core = CoreStub()
+    status = sizing.install(core, setup_worker)
+
+    assert status["automaticGradeRiskPct"] == {"A+": 1.0, "A": 1.0}
+    assert status["maximumLeverage"] == 10
+    assert status["fixedPerTradeMarginCapEnabled"] is False
+    assert status["fixedCombinedMarginCapEnabled"] is False
+    assert status["fixedFreeMarginReserveEnabled"] is False
+    assert status["perTradeMarginCapPct"] is None
+    assert status["combinedMarginCapPct"] is None
+    assert status["minimumFreeMarginReservePct"] is None
 
 
 def test_same_input_is_idempotent_and_persisted_across_restart():
