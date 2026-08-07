@@ -1,10 +1,9 @@
-"""Persistent Step-8 position sizing and margin validation.
+"""Persistent authoritative position sizing for the locked 08 Aug 2026 plan.
 
-This stage consumes Step-7 risk-approved closed-5M candidates. It reuses the
-existing setup worker's structural 15M price-plan helper and existing cost/net-RR
-policy. It never submits an order and never mutates exchange margin settings.
-The later Node.js execution service must enforce the approved Isolated 5x
-contract before submitting an order.
+This stage consumes authoritative risk-approved closed-5M candidates, derives the
+existing structural 15M stop/target plan, and sizes the position from approved
+risk and stop distance. It never submits exchange orders or mutates exchange
+margin settings. Node.js remains the execution owner.
 """
 
 from __future__ import annotations
@@ -23,14 +22,11 @@ except ImportError:  # pragma: no cover
     from scanner_safety import filter_closed_candles
 
 
-POLICY_ID = "POSITION_SIZING_MARGIN_V1"
+POLICY_ID = "POSITION_SIZING_LOCKED_2026_08_08"
 _PERSIST_KEY = "position_sizing_margin_v1"
-LEVERAGE = 5.0
+LEVERAGE = 10.0
 MARGIN_MODE = "ISOLATED"
-PER_TRADE_MARGIN_CAP_PCT = 25.0
-TOTAL_MARGIN_CAP_PCT = 60.0
-FREE_MARGIN_RESERVE_PCT = 40.0
-GRADE_RISK_PCT = {"A+": 1.0, "A": 0.75}
+GRADE_RISK_PCT = {"A+": 1.0, "A": 1.0}
 
 _STATE_LOCK = threading.RLock()
 _BUILD_LOCK = threading.Lock()
@@ -40,9 +36,9 @@ _PRICE_PLAN: Callable[..., tuple[dict[str, float] | None, str]] | None = None
 
 _STATE: dict[str, Any] = {
     "status": "idle",
-    "version": 1,
+    "version": 2,
     "policyId": POLICY_ID,
-    "source": "step7_risk_approved_existing_technical_plan",
+    "source": "authoritative_risk_existing_technical_plan",
     "fiveMinuteCandleTime": None,
     "inputFingerprint": None,
     "updatedAt": 0,
@@ -68,9 +64,9 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
     approved = [dict(row) for row in _STATE.get("approvedSizingQueue") or []]
     return {
         "status": status_override or str(_STATE.get("status") or "idle"),
-        "version": int(_STATE.get("version") or 1),
+        "version": int(_STATE.get("version") or 2),
         "policyId": str(_STATE.get("policyId") or POLICY_ID),
-        "source": str(_STATE.get("source") or "step7_risk_approved_existing_technical_plan"),
+        "source": str(_STATE.get("source") or "authoritative_risk_existing_technical_plan"),
         "fiveMinuteCandleTime": _STATE.get("fiveMinuteCandleTime"),
         "inputFingerprint": _STATE.get("inputFingerprint"),
         "updatedAt": int(_STATE.get("updatedAt") or 0),
@@ -122,9 +118,9 @@ def _load_persisted() -> None:
         _STATE.update(
             {
                 "status": str(saved.get("status") or "idle"),
-                "version": int(saved.get("version") or 1),
-                "policyId": str(saved.get("policyId") or POLICY_ID),
-                "source": str(saved.get("source") or "step7_risk_approved_existing_technical_plan"),
+                "version": int(saved.get("version") or 2),
+                "policyId": POLICY_ID,
+                "source": "authoritative_risk_existing_technical_plan",
                 "fiveMinuteCandleTime": saved.get("fiveMinuteCandleTime"),
                 "inputFingerprint": saved.get("inputFingerprint"),
                 "updatedAt": int(saved.get("updatedAt") or 0),
@@ -190,20 +186,17 @@ def _fingerprint(upstream: Mapping[str, Any]) -> str:
 
 
 def _setup_config() -> dict[str, Any]:
+    fallback = {
+        "minimumClosedCandles": 60,
+        "minimumRiskReward": 2.0,
+        "structureLookback": 12,
+    }
     if _SETUP_SETTINGS is None:
-        return {
-            "minimumClosedCandles": 60,
-            "minimumRiskReward": 2.0,
-            "structureLookback": 12,
-        }
+        return fallback
     try:
-        return dict(_SETUP_SETTINGS() or {})
+        return dict(_SETUP_SETTINGS() or fallback)
     except Exception:
-        return {
-            "minimumClosedCandles": 60,
-            "minimumRiskReward": 2.0,
-            "structureLookback": 12,
-        }
+        return fallback
 
 
 def _technical_plan(core: Any, candidate: Mapping[str, Any]) -> tuple[dict[str, float] | None, str]:
@@ -252,10 +245,7 @@ def _wallet_snapshot(core: Any) -> dict[str, Any]:
     available = _number(account.get("totalAvailableBalance"), -1.0)
     initial = _number(account.get("totalInitialMargin"), -1.0)
     if equity <= 0 or available < 0:
-        return {
-            "ok": False,
-            "reason": "Wallet equity or total available balance is unavailable",
-        }
+        return {"ok": False, "reason": "Wallet equity or total available balance is unavailable"}
     if initial < 0:
         positions_reader = getattr(core, "get_open_positions", None)
         if not callable(positions_reader):
@@ -267,15 +257,9 @@ def _wallet_snapshot(core: Any) -> dict[str, Any]:
         for position in positions:
             if not isinstance(position, dict):
                 continue
-            position_im = _number(
-                position.get("positionIM") or position.get("positionIMByMp"),
-                -1.0,
-            )
+            position_im = _number(position.get("positionIM") or position.get("positionIMByMp"), -1.0)
             if position_im < 0:
-                return {
-                    "ok": False,
-                    "reason": "An open position has no authoritative initial-margin value",
-                }
+                return {"ok": False, "reason": "An open position has no authoritative initial-margin value"}
             initial += position_im
     return {
         "ok": True,
@@ -325,6 +309,7 @@ def _evaluate_candidate(
     side = str(item.get("side") or "")
     grade = str(item.get("grade") or "")
     entry = _number(item.get("entryReference"), 0.0)
+
     if (
         not item.get("riskApproved")
         or item.get("riskStatus") != "APPROVED_RISK"
@@ -347,7 +332,7 @@ def _evaluate_candidate(
         return _blocked(
             item,
             code="GRADE_RISK_BLOCKED",
-            reason="Automatic sizing allows A+ at 1.00% and A at 0.75%; B+ is rejected",
+            reason="Automatic sizing allows A+ and A at 1.00%; B+ is rejected",
             checks=checks,
             timestamp=timestamp,
         )
@@ -372,8 +357,7 @@ def _evaluate_candidate(
     original_take = _number(plan.get("takeProfitReference"), 0.0)
     stop_valid = stop > 0 and ((side == "Buy" and stop < entry) or (side == "Sell" and stop > entry))
     take_valid = original_take > 0 and (
-        (side == "Buy" and original_take > entry)
-        or (side == "Sell" and original_take < entry)
+        (side == "Buy" and original_take > entry) or (side == "Sell" and original_take < entry)
     )
     checks["technicalPlan"].update(
         {
@@ -425,17 +409,22 @@ def _evaluate_candidate(
         )
 
     stop_distance = abs(entry - stop)
+    if stop_distance <= 0:
+        return _blocked(
+            item,
+            code="INVALID_TECHNICAL_STOP",
+            reason="Structural stop distance is zero",
+            checks=checks,
+            timestamp=timestamp,
+        )
+
     risk_budget = equity * (effective_risk_pct / 100.0)
     raw_risk_qty = risk_budget / stop_distance
-    per_trade_margin_cap = equity * (PER_TRADE_MARGIN_CAP_PCT / 100.0)
-    total_margin_cap = equity * (TOTAL_MARGIN_CAP_PCT / 100.0)
-    effective_current_margin = current_initial + reserved_margin
-    remaining_total_margin = max(0.0, total_margin_cap - effective_current_margin)
     remaining_available = max(0.0, available - reserved_margin)
-    allowed_margin = min(per_trade_margin_cap, remaining_total_margin, remaining_available)
-    max_margin_qty = (allowed_margin * LEVERAGE) / entry if allowed_margin > 0 else 0.0
-    raw_qty = min(raw_risk_qty, max_margin_qty)
+    max_available_qty = (remaining_available * LEVERAGE) / entry if remaining_available > 0 else 0.0
+    raw_qty = min(raw_risk_qty, max_available_qty)
     margin_reduced = raw_qty + 1e-12 < raw_risk_qty
+
     checks["riskAndMargin"] = {
         "grade": grade,
         "gradeRiskPct": grade_risk_pct,
@@ -450,18 +439,18 @@ def _evaluate_candidate(
         "availableMargin": available,
         "currentInitialMargin": current_initial,
         "reservedMarginThisCycle": reserved_margin,
-        "perTradeMarginCapUsdt": per_trade_margin_cap,
-        "totalMarginCapUsdt": total_margin_cap,
-        "remainingTotalMarginUsdt": remaining_total_margin,
-        "allowedMarginUsdt": allowed_margin,
-        "marginQuantityCap": max_margin_qty,
-        "quantityReducedByMargin": margin_reduced,
+        "remainingAvailableMarginUsdt": remaining_available,
+        "availableMarginQuantityCap": max_available_qty,
+        "quantityReducedByAvailableMargin": margin_reduced,
+        "fixedPerTradeMarginCapEnabled": False,
+        "fixedCombinedMarginCapEnabled": False,
+        "fixedFreeReserveGateEnabled": False,
     }
     if raw_qty <= 0:
         return _blocked(
             item,
-            code="MARGIN_CAP_EXHAUSTED",
-            reason="Available, per-trade, or combined margin capacity is exhausted",
+            code="AVAILABLE_MARGIN_EXHAUSTED",
+            reason="No real available margin remains for the risk-sized position",
             checks=checks,
             timestamp=timestamp,
         )
@@ -475,6 +464,7 @@ def _evaluate_candidate(
             checks=checks,
             timestamp=timestamp,
         )
+
     qty_step = Decimal(str(rules.get("qtyStep") or "0"))
     min_qty = Decimal(str(rules.get("minOrderQty") or "0"))
     max_qty = Decimal(str(rules.get("maxOrderQty") or "0"))
@@ -485,9 +475,8 @@ def _evaluate_candidate(
     notional = qty * Decimal(str(entry))
     actual_risk = float(qty) * stop_distance
     required_margin = float(notional) / LEVERAGE
-    projected_total_margin = effective_current_margin + required_margin
+    projected_total_margin = current_initial + reserved_margin + required_margin
     projected_free_margin = equity - projected_total_margin
-    free_reserve_required = equity * (FREE_MARGIN_RESERVE_PCT / 100.0)
 
     invalid_rules = (
         qty <= 0
@@ -495,13 +484,11 @@ def _evaluate_candidate(
         or (max_qty > 0 and qty > max_qty)
         or (min_notional > 0 and notional < min_notional)
     )
-    cap_violation = (
-        required_margin > per_trade_margin_cap + 1e-8
-        or projected_total_margin > total_margin_cap + 1e-8
-        or required_margin > remaining_available + 1e-8
-        or projected_free_margin + 1e-8 < free_reserve_required
+    risk_or_available_violation = (
+        required_margin > remaining_available + 1e-8
         or actual_risk > risk_budget + 1e-8
     )
+
     checks["bybitRules"] = {
         "ok": not invalid_rules,
         "qtyStep": str(qty_step),
@@ -512,25 +499,27 @@ def _evaluate_candidate(
         "notional": str(notional),
     }
     checks["marginProjection"] = {
-        "ok": not cap_violation,
+        "ok": not risk_or_available_violation,
         "requiredInitialMarginUsdt": required_margin,
         "projectedTotalInitialMarginUsdt": projected_total_margin,
         "projectedFreeMarginUsdt": projected_free_margin,
-        "minimumFreeMarginReserveUsdt": free_reserve_required,
+        "remainingAvailableMarginUsdt": remaining_available,
+        "fixedMarginCapsEnabled": False,
     }
+
     if invalid_rules:
         return _blocked(
             item,
             code="BYBIT_QUANTITY_RULE_BLOCKED",
-            reason="Risk/margin-based quantity does not meet Bybit quantity or min-notional rules",
+            reason="Risk-sized quantity does not meet Bybit quantity or min-notional rules",
             checks=checks,
             timestamp=timestamp,
         )
-    if cap_violation:
+    if risk_or_available_violation:
         return _blocked(
             item,
-            code="MARGIN_OR_RISK_CAP_BLOCKED",
-            reason="Rounded quantity violates approved risk, margin, or free-reserve limits",
+            code="RISK_OR_AVAILABLE_MARGIN_BLOCKED",
+            reason="Rounded quantity exceeds approved risk or real available margin",
             checks=checks,
             timestamp=timestamp,
         )
@@ -560,6 +549,7 @@ def _evaluate_candidate(
     adjusted_distance = entry * (adjusted_take_pct / 100.0)
     adjusted_take = entry + adjusted_distance if side == "Buy" else entry - adjusted_distance
     risk_reward = adjusted_take_pct / stop_pct if stop_pct > 0 else 0.0
+
     approved = {
         **item,
         "positionSizingStatus": "SIZING_APPROVED",
@@ -569,7 +559,7 @@ def _evaluate_candidate(
         "sizingDecision": {
             "ok": True,
             "code": "SIZING_APPROVED",
-            "reason": "Technical-stop risk sizing and Isolated 5x margin policy approved",
+            "reason": "Technical-stop risk sizing approved under locked Isolated max-10x policy",
             "checks": checks,
         },
         "qualityGrade": grade,
@@ -595,9 +585,9 @@ def _evaluate_candidate(
         "projectedFreeMarginUsdt": round(projected_free_margin, 8),
         "marginReducedQuantity": margin_reduced,
         "marginCaps": {
-            "perTradePct": PER_TRADE_MARGIN_CAP_PCT,
-            "combinedPct": TOTAL_MARGIN_CAP_PCT,
-            "minimumFreeReservePct": FREE_MARGIN_RESERVE_PCT,
+            "fixedPerTradeEnabled": False,
+            "fixedCombinedEnabled": False,
+            "fixedFreeReserveEnabled": False,
         },
         "nodeExecutionRequirements": {
             "marginMode": MARGIN_MODE,
@@ -625,12 +615,12 @@ def build(
         source = dict(upstream or _risk_snapshot(core))
         if str(source.get("status") or "") not in {"ready", "empty"}:
             raise RuntimeError("Authoritative entry-risk snapshot is not ready")
-        queue = [
-            dict(row)
-            for row in source.get("approvedRiskQueue") or []
-            if isinstance(row, dict)
-        ]
-        wallet = _wallet_snapshot(core) if queue else {"ok": True, "equity": 0.0, "availableMargin": 0.0, "currentInitialMargin": 0.0}
+        queue = [dict(row) for row in source.get("approvedRiskQueue") or [] if isinstance(row, dict)]
+        wallet = (
+            _wallet_snapshot(core)
+            if queue
+            else {"ok": True, "equity": 0.0, "availableMargin": 0.0, "currentInitialMargin": 0.0}
+        )
         rows: list[dict[str, Any]] = []
         approved: list[dict[str, Any]] = []
         reserved_margin = 0.0
@@ -654,20 +644,24 @@ def build(
             "blocked": len(rows) - len(approved),
             "technicalPlanChecks": len(rows),
             "walletChecks": 1 if queue else 0,
-            "instrumentRuleChecks": sum(1 for row in rows if "bybitRules" in (row.get("sizingDecision") or {}).get("checks", {})),
+            "instrumentRuleChecks": sum(
+                1
+                for row in rows
+                if "bybitRules" in (row.get("sizingDecision") or {}).get("checks", {})
+            ),
             "marginReduced": sum(1 for row in approved if row.get("marginReducedQuantity")),
             "reservedInitialMarginUsdt": round(reserved_margin, 8),
             "orderSubmissions": 0,
-            "automaticRiskPolicy": "A_PLUS_1_PERCENT_A_0_75_PERCENT_B_PLUS_REJECT",
+            "automaticRiskPolicy": "A_PLUS_1_PERCENT_A_1_PERCENT_B_PLUS_REJECT",
             "manualDemoRiskPolicyChanged": False,
-            "marginPolicy": "ISOLATED_5X_PER_TRADE_25_COMBINED_60_FREE_40",
+            "marginPolicy": "ISOLATED_MAX_10X_AVAILABLE_MARGIN_ONLY_NO_FIXED_25_60_40_GATES",
         }
         fingerprint = _fingerprint(source)
         payload = {
             "status": "ready" if rows else "empty",
-            "version": 1,
+            "version": 2,
             "policyId": POLICY_ID,
-            "source": "step7_risk_approved_existing_technical_plan",
+            "source": "authoritative_risk_existing_technical_plan",
             "fiveMinuteCandleTime": source.get("fiveMinuteCandleTime"),
             "inputFingerprint": fingerprint,
             "updatedAt": timestamp,
@@ -734,9 +728,13 @@ def status(core: Any | None = None) -> dict[str, Any]:
         "technicalStopSource": "setup_worker._price_plan",
         "marginMode": MARGIN_MODE,
         "leverage": int(LEVERAGE),
-        "perTradeMarginCapPct": PER_TRADE_MARGIN_CAP_PCT,
-        "combinedMarginCapPct": TOTAL_MARGIN_CAP_PCT,
-        "minimumFreeMarginReservePct": FREE_MARGIN_RESERVE_PCT,
+        "maximumLeverage": int(LEVERAGE),
+        "fixedPerTradeMarginCapEnabled": False,
+        "fixedCombinedMarginCapEnabled": False,
+        "fixedFreeMarginReserveEnabled": False,
+        "perTradeMarginCapPct": None,
+        "combinedMarginCapPct": None,
+        "minimumFreeMarginReservePct": None,
         "submitsOrder": False,
         "snapshot": snapshot(),
     }
@@ -748,9 +746,9 @@ def _reset_for_tests() -> None:
         _STATE.update(
             {
                 "status": "idle",
-                "version": 1,
+                "version": 2,
                 "policyId": POLICY_ID,
-                "source": "step7_risk_approved_existing_technical_plan",
+                "source": "authoritative_risk_existing_technical_plan",
                 "fiveMinuteCandleTime": None,
                 "inputFingerprint": None,
                 "updatedAt": 0,
