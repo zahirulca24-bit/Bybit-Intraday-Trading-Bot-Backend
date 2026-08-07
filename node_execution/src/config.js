@@ -22,7 +22,7 @@ export function loadConfig(env = process.env) {
   const enabled = String(env.NODE_EXECUTION_ENABLED || 'false').toLowerCase() === 'true';
   const firstDemoTradeArmed = String(env.FIRST_DEMO_TRADE_ARMED || 'false').toLowerCase() === 'true';
   const maxActiveTrades = Math.trunc(boundedNumber(env, 'MAX_ACTIVE_TRADES', 3, 3, 3));
-  const riskPerTradePct = boundedNumber(env, 'FIRST_DEMO_RISK_PER_TRADE_PCT', 0.25, 0.25, 0.25);
+  const gradeRiskPct = Object.freeze({ 'A+': 1.0, A: 0.75 });
   return Object.freeze({
     databaseUrl: required(env, 'DATABASE_URL'),
     apiKey: required(env, 'BYBIT_API_KEY'),
@@ -32,7 +32,7 @@ export function loadConfig(env = process.env) {
     enabled,
     firstDemoTradeArmed,
     maxActiveTrades,
-    riskPerTradePct,
+    gradeRiskPct,
     port: Math.trunc(boundedNumber(env, 'PORT', 8080, 1, 65535)),
     pollMs: Math.trunc(boundedNumber(env, 'NODE_EXECUTION_POLL_MS', 3000, 500, 60000)),
     fillPollMs: Math.trunc(boundedNumber(env, 'NODE_FILL_POLL_MS', 1000, 250, 10000)),
