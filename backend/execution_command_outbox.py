@@ -1,9 +1,10 @@
 """Durable Python-to-Node execution-command publisher.
 
-Consumes Step-8 ``SIZING_APPROVED`` rows and inserts their exact immutable JSON
-payload into PostgreSQL as AVAILABLE commands. Duplicate candidate keys are
-idempotent. A duplicate with different payload is an integrity conflict and is
-never overwritten. This stage does not claim commands or submit orders.
+Consumes sizing-ready rows and persists their immutable JSON payload to
+PostgreSQL as AVAILABLE commands for the Node execution worker. PostgreSQL is
+support infrastructure, not a trade-eligibility gate: persistence problems are
+reported as WAIT/RETRY/DEGRADED and never reclassify an already risk-approved
+trade as rejected.
 """
 
 from __future__ import annotations
@@ -13,15 +14,15 @@ import threading
 import time
 from typing import Any, Mapping
 
-POLICY_ID = "PYTHON_NODE_EXECUTION_CONTRACT_V1"
+POLICY_ID = "PYTHON_NODE_EXECUTION_CONTRACT_V2_NONBLOCKING_SUPPORT"
 _STATE_LOCK = threading.RLock()
 _BUILD_LOCK = threading.Lock()
 
 _STATE: dict[str, Any] = {
     "status": "idle",
-    "version": 1,
+    "version": 2,
     "policyId": POLICY_ID,
-    "source": "step8_sizing_approved_postgresql_outbox",
+    "source": "sizing_ready_postgresql_support_outbox",
     "inputFingerprint": None,
     "updatedAt": 0,
     "rows": [],
@@ -33,11 +34,9 @@ _STATE: dict[str, Any] = {
 def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
     return {
         "status": status_override or str(_STATE.get("status") or "idle"),
-        "version": int(_STATE.get("version") or 1),
+        "version": int(_STATE.get("version") or 2),
         "policyId": str(_STATE.get("policyId") or POLICY_ID),
-        "source": str(
-            _STATE.get("source") or "step8_sizing_approved_postgresql_outbox"
-        ),
+        "source": str(_STATE.get("source") or "sizing_ready_postgresql_support_outbox"),
         "inputFingerprint": _STATE.get("inputFingerprint"),
         "updatedAt": int(_STATE.get("updatedAt") or 0),
         "rows": [dict(row) for row in _STATE.get("rows") or []],
@@ -45,6 +44,8 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
         "lastError": _STATE.get("lastError"),
         "orderSubmissions": 0,
         "claimsCreatedByPython": 0,
+        "supportOnly": True,
+        "tradeRejectionAuthority": False,
     }
 
 
@@ -92,7 +93,7 @@ def _validation_error(candidate: Mapping[str, Any]) -> str | None:
     if not candidate.get("candidateKey"):
         return "candidateKey is required"
     if not candidate.get("sizingApproved"):
-        return "Step-8 sizing approval is required"
+        return "Sizing output is not ready"
     if candidate.get("positionSizingStatus") != "SIZING_APPROVED":
         return "positionSizingStatus must be SIZING_APPROVED"
     if candidate.get("executionStatus") != "AWAITING_NODE_EXECUTION":
@@ -118,15 +119,19 @@ def _validation_error(candidate: Mapping[str, Any]) -> str | None:
         leverage = int(candidate.get("leverage") or 0)
     except (TypeError, ValueError):
         leverage = 0
-    if leverage != 5:
-        return "leverage must be 5"
+    if leverage <= 0 or leverage > 10:
+        return "leverage must be between 1 and 10"
     requirements = candidate.get("nodeExecutionRequirements")
     if not isinstance(requirements, dict):
         return "nodeExecutionRequirements are required"
     if str(requirements.get("marginMode") or "").upper() != "ISOLATED":
         return "Node margin-mode requirement must be ISOLATED"
-    if int(requirements.get("leverage") or 0) != 5:
-        return "Node leverage requirement must be 5"
+    try:
+        required_leverage = int(requirements.get("leverage") or 0)
+    except (TypeError, ValueError):
+        required_leverage = 0
+    if required_leverage <= 0 or required_leverage > 10:
+        return "Node leverage requirement must be between 1 and 10"
     if requirements.get("revalidateWalletAndInstrumentRules") is not True:
         return "Node wallet/instrument revalidation is required"
     if requirements.get("submitOnlyAfterRevalidation") is not True:
@@ -154,21 +159,23 @@ def _store(core: Any) -> tuple[Any | None, str | None]:
         not status.get("ok")
         or status.get("degraded")
         or not status.get("restartSafe")
-        or str(status.get("backend") or "") != "postgresql"
+        or str(status.get("backend") or "").lower() != "postgresql"
     ):
-        return None, "Healthy restart-safe PostgreSQL is required"
+        return None, "Healthy restart-safe PostgreSQL is temporarily unavailable"
     return store, None
 
 
-def _blocked(candidate: Mapping[str, Any], code: str, reason: str) -> dict[str, Any]:
+def _support_wait(candidate: Mapping[str, Any], code: str, reason: str) -> dict[str, Any]:
     return {
         "candidateKey": candidate.get("candidateKey"),
         "symbol": candidate.get("symbol"),
-        "state": "BLOCKED",
+        "state": "WAIT_RETRY",
         "published": False,
         "code": code,
         "reason": reason,
         "orderSubmitted": False,
+        "tradeRejected": False,
+        "supportOnly": True,
     }
 
 
@@ -178,7 +185,7 @@ def build(
     *,
     upstream: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Publish current Step-8 approvals without claiming or executing them."""
+    """Persist current sizing outputs without claiming or executing them."""
     timestamp = int(now or time.time())
     if not _BUILD_LOCK.acquire(blocking=False):
         with _STATE_LOCK:
@@ -187,110 +194,137 @@ def build(
     try:
         source = dict(upstream or _sizing_snapshot(core))
         source_status = str(source.get("status") or "")
-        if source_status not in {"ready", "empty"}:
-            raise RuntimeError("Step-8 position sizing is not ready")
+        if source_status not in {"ready", "empty", "degraded"}:
+            raise RuntimeError("Position sizing snapshot is not ready")
         candidates = [
             dict(row)
             for row in source.get("approvedSizingQueue") or []
             if isinstance(row, dict)
         ]
         store, store_error = _store(core)
-        if store is None:
-            raise RuntimeError(store_error or "Execution-command store unavailable")
 
         rows: list[dict[str, Any]] = []
         published = 0
         duplicates = 0
-        blocked = 0
+        waiting = 0
         conflicts = 0
-        for candidate in candidates:
-            validation_error = _validation_error(candidate)
-            if validation_error:
-                rows.append(
-                    _blocked(candidate, "INVALID_SIZING_CONTRACT", validation_error)
-                )
-                blocked += 1
-                continue
 
-            candidate_key = str(candidate["candidateKey"])
-            created = bool(
-                store.publish_execution_command(
-                    candidate_key,
-                    dict(candidate),
-                    created_at=timestamp,
+        if store is None:
+            rows = [
+                _support_wait(
+                    candidate,
+                    "OUTBOX_SUPPORT_UNAVAILABLE",
+                    store_error or "PostgreSQL support outbox unavailable; retry without changing trade eligibility",
                 )
-            )
-            stored = store.get_execution_command(candidate_key)
-            if not isinstance(stored, dict):
-                rows.append(
-                    _blocked(
-                        candidate,
-                        "OUTBOX_PERSISTENCE_FAILED",
-                        "Published command could not be reloaded",
+                for candidate in candidates
+            ]
+            waiting = len(rows)
+        else:
+            for candidate in candidates:
+                validation_error = _validation_error(candidate)
+                if validation_error:
+                    rows.append(
+                        _support_wait(candidate, "EXECUTION_PAYLOAD_NOT_READY", validation_error)
                     )
-                )
-                blocked += 1
-                continue
-            if _canonical(stored.get("payload") or {}) != _canonical(candidate):
-                rows.append(
-                    _blocked(
-                        candidate,
-                        "IMMUTABLE_PAYLOAD_CONFLICT",
-                        "Candidate key already exists with a different immutable payload",
-                    )
-                )
-                blocked += 1
-                conflicts += 1
-                continue
+                    waiting += 1
+                    continue
 
-            state = str(stored.get("state") or "")
-            rows.append(
-                {
-                    "candidateKey": candidate_key,
-                    "symbol": candidate.get("symbol"),
-                    "state": state,
-                    "slotId": stored.get("slotId"),
-                    "ownerId": stored.get("ownerId"),
-                    "published": created,
-                    "code": "COMMAND_PUBLISHED" if created else "COMMAND_ALREADY_EXISTS",
-                    "reason": (
-                        "Immutable Step-8 command published as AVAILABLE"
-                        if created
-                        else "Existing immutable command retained without overwrite"
-                    ),
-                    "orderSubmitted": False,
-                }
-            )
-            if created:
-                published += 1
-            else:
-                duplicates += 1
+                candidate_key = str(candidate["candidateKey"])
+                try:
+                    created = bool(
+                        store.publish_execution_command(
+                            candidate_key,
+                            dict(candidate),
+                            created_at=timestamp,
+                        )
+                    )
+                    stored = store.get_execution_command(candidate_key)
+                except Exception as exc:
+                    rows.append(
+                        _support_wait(
+                            candidate,
+                            "OUTBOX_PERSISTENCE_RETRY",
+                            f"PostgreSQL support write/read failed and will retry: {exc}",
+                        )
+                    )
+                    waiting += 1
+                    continue
+
+                if not isinstance(stored, dict):
+                    rows.append(
+                        _support_wait(
+                            candidate,
+                            "OUTBOX_PERSISTENCE_RETRY",
+                            "Published command could not be reloaded; retry without changing trade eligibility",
+                        )
+                    )
+                    waiting += 1
+                    continue
+                if _canonical(stored.get("payload") or {}) != _canonical(candidate):
+                    rows.append(
+                        _support_wait(
+                            candidate,
+                            "IMMUTABLE_PAYLOAD_CONFLICT",
+                            "Candidate key already exists with a different immutable payload; operator reconciliation required",
+                        )
+                    )
+                    waiting += 1
+                    conflicts += 1
+                    continue
+
+                state = str(stored.get("state") or "")
+                rows.append(
+                    {
+                        "candidateKey": candidate_key,
+                        "symbol": candidate.get("symbol"),
+                        "state": state,
+                        "slotId": stored.get("slotId"),
+                        "ownerId": stored.get("ownerId"),
+                        "published": created,
+                        "code": "COMMAND_PUBLISHED" if created else "COMMAND_ALREADY_EXISTS",
+                        "reason": (
+                            "Immutable execution command persisted as AVAILABLE"
+                            if created
+                            else "Existing immutable command retained without overwrite"
+                        ),
+                        "orderSubmitted": False,
+                        "tradeRejected": False,
+                        "supportOnly": True,
+                    }
+                )
+                if created:
+                    published += 1
+                else:
+                    duplicates += 1
 
         fingerprint = _fingerprint(source)
         metrics = {
             "sizingApprovedInput": len(candidates),
             "published": published,
             "idempotentDuplicates": duplicates,
-            "blocked": blocked,
+            "waitingRetry": waiting,
+            "blocked": 0,
             "immutableConflicts": conflicts,
             "claimOperations": 0,
             "orderSubmissions": 0,
             "maximumNodeSlots": 3,
             "automaticClaimExpiry": False,
-            "policy": "POSTGRESQL_IMMUTABLE_EXECUTION_OUTBOX",
+            "policy": "POSTGRESQL_SUPPORT_ONLY_NON_REJECTION_OUTBOX",
+            "tradeRejectionAuthority": False,
         }
+        degraded = waiting > 0
         payload = {
-            "status": "ready" if rows else "empty",
-            "version": 1,
+            "status": "degraded" if degraded else ("ready" if rows else "empty"),
+            "version": 2,
             "policyId": POLICY_ID,
-            "source": "step8_sizing_approved_postgresql_outbox",
+            "source": "sizing_ready_postgresql_support_outbox",
             "inputFingerprint": fingerprint,
             "updatedAt": timestamp,
             "rows": rows,
             "metrics": metrics,
             "lastError": (
-                "Immutable execution-command conflict requires operator review"
-                if conflicts
+                "PostgreSQL support persistence requires retry/reconciliation; trade eligibility is unchanged"
+                if degraded
                 else None
             ),
         }
@@ -301,9 +335,9 @@ def build(
         with _STATE_LOCK:
             _STATE.update(
                 {
-                    "status": "error",
+                    "status": "degraded",
                     "updatedAt": timestamp,
-                    "lastError": str(exc),
+                    "lastError": f"Support outbox unavailable: {exc}",
                 }
             )
             return _snapshot_unlocked()
@@ -317,7 +351,7 @@ def due(core: Any) -> bool:
     with _STATE_LOCK:
         return bool(
             fingerprint != str(_STATE.get("inputFingerprint") or "")
-            or str(_STATE.get("status") or "") == "error"
+            or str(_STATE.get("status") or "") in {"error", "degraded"}
         )
 
 
@@ -348,10 +382,13 @@ def status(core: Any | None = None) -> dict[str, Any]:
         "policyId": POLICY_ID,
         "immutablePayload": True,
         "maximumNodeSlots": 3,
+        "maximumLeverage": 10,
         "usesPostgresSkipLocked": True,
         "automaticClaimExpiry": False,
         "claimsCommands": False,
         "submitsOrder": False,
+        "supportOnly": True,
+        "tradeRejectionAuthority": False,
         "snapshot": snapshot(),
     }
 
@@ -361,9 +398,9 @@ def _reset_for_tests() -> None:
         _STATE.update(
             {
                 "status": "idle",
-                "version": 1,
+                "version": 2,
                 "policyId": POLICY_ID,
-                "source": "step8_sizing_approved_postgresql_outbox",
+                "source": "sizing_ready_postgresql_support_outbox",
                 "inputFingerprint": None,
                 "updatedAt": 0,
                 "rows": [],
