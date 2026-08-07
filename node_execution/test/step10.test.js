@@ -98,7 +98,7 @@ function bybitMock(resolution = { state: 'FILLED', executions: [{ execId: 'e1', 
   };
 }
 
-test('configuration is demo-only, requires stable owner identity, and is disabled by default', () => {
+test('configuration is demo-only, requires stable owner identity, and is enabled by default', () => {
   const env = {
     DATABASE_URL: 'postgres://x',
     BYBIT_API_KEY: 'k',
@@ -107,7 +107,7 @@ test('configuration is demo-only, requires stable owner identity, and is disable
   };
   const cfg = loadConfig(env);
   assert.equal(cfg.baseUrl, 'https://api-demo.bybit.com');
-  assert.equal(cfg.enabled, false);
+  assert.equal(cfg.enabled, true);
   assert.equal(cfg.port, 8080);
   assert.throws(() => loadConfig({ ...env, BYBIT_BASE_URL: 'https://api.bybit.com' }), /locked to Bybit Demo/);
   assert.throws(() => loadConfig({ ...env, NODE_EXECUTION_OWNER_ID: '' }), /required/);
@@ -203,10 +203,10 @@ test('Cloud Run health server binds a port and readiness is fail-closed', async 
       3: { state: 'WAITING', candidateKey: null },
     };
     const ready = await fetch(`http://127.0.0.1:${port}/readyz`);
-    const payload = await ready.json();
+    const responsePayload = await ready.json();
     assert.equal(ready.status, 200);
-    assert.equal(payload.serviceReady, true);
-    assert.equal(payload.executionReady, false);
+    assert.equal(responsePayload.serviceReady, true);
+    assert.equal(responsePayload.executionReady, false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
