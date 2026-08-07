@@ -9,7 +9,7 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   if (config.baseUrl !== 'https://api-demo.bybit.com') reasons.push('Bybit endpoint is not Demo.');
   if (!config.enabled) reasons.push('NODE_EXECUTION_ENABLED is false.');
   if (!config.firstDemoTradeArmed) reasons.push('FIRST_DEMO_TRADE_ARMED is false.');
-  if (config.maxActiveTrades !== 1) reasons.push('FIRST_DEMO_MAX_ACTIVE_TRADES must equal 1.');
+  if (config.maxActiveTrades !== 3) reasons.push('MAX_ACTIVE_TRADES must equal 3.');
   if (config.riskPerTradePct !== 0.25) reasons.push('FIRST_DEMO_RISK_PER_TRADE_PCT must equal 0.25.');
 
   const [positionsResponse, ordersResponse, activeResult] = await Promise.all([
