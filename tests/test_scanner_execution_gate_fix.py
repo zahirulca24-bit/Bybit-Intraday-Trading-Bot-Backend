@@ -15,7 +15,6 @@ class DummyEngine:
         pass
 
     def risk_check(self, state, signal):
-        # original risk_check returns True by default for this test
         self.risk_calls.append((state, signal))
         return True, "ok"
 
@@ -23,13 +22,11 @@ class DummyEngine:
 class DummyCore:
     def __init__(self):
         self.engine = DummyEngine()
-        # represent a freshly-signalled symbol
         self._current_scanner_signal = {"symbol": "BTCUSDT", "signal": "Buy", "votes": []}
 
     def get_bot_engine(self):
         return self.engine
 
-    # These are required by scanner_execution_gate.install: keep minimal stubs.
     def top_gainer_universe(self, *args, **kwargs):
         return {"symbols": [], "rows": []}
 
@@ -42,7 +39,6 @@ def test_execution_gate_refreshes_universe_on_miss(monkeypatch):
 
     core = DummyCore()
     engine = core.get_bot_engine()
-
     calls = []
 
     def build_universe_stub(core_arg, force=False, limit=None):
@@ -52,7 +48,6 @@ def test_execution_gate_refreshes_universe_on_miss(monkeypatch):
         return {"symbols": ["BTCUSDT"], "rows": [{"symbol": "BTCUSDT", "costTier": "normal"}]}
 
     monkeypatch.setattr(intraday_scanner, "build_universe", build_universe_stub)
-
     scanner_execution_gate.install(core)
 
     state = {"symbol": "BTCUSDT"}
@@ -62,3 +57,29 @@ def test_execution_gate_refreshes_universe_on_miss(monkeypatch):
     assert calls[0] is False
     assert True in calls, "expected a forced refresh when the symbol was missing"
     assert allowed is True, f"Expected allowed after refresh; blocked with reason: {reason}"
+
+
+def test_strong_only_tier_accepts_one_matching_strategy_vote(monkeypatch):
+    """Locked policy permits one valid matching strategy; no hidden two-vote gate."""
+
+    core = DummyCore()
+    engine = core.get_bot_engine()
+    core._current_scanner_signal = {
+        "symbol": "BTCUSDT",
+        "signal": "Buy",
+        "votes": [{"engine": "trend", "signal": "Buy", "strength": 4.0}],
+    }
+
+    monkeypatch.setattr(
+        intraday_scanner,
+        "build_universe",
+        lambda core_arg, force=False, limit=None: {
+            "symbols": ["BTCUSDT"],
+            "rows": [{"symbol": "BTCUSDT", "costTier": "strong_only"}],
+        },
+    )
+
+    scanner_execution_gate.install(core)
+    allowed, reason = engine.risk_check({"symbol": "BTCUSDT"}, "Buy")
+
+    assert allowed is True, f"Single matching strategy must be allowed; blocked with reason: {reason}"
