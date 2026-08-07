@@ -71,7 +71,7 @@ class CoreStub:
 
     def place_demo_order(self, *args, **kwargs):
         self.order_calls += 1
-        raise AssertionError("Step 9 must not submit orders")
+        raise AssertionError("Outbox support must not submit orders")
 
 
 def candidate(key="BTCUSDT:2700000:3600000:Buy:Trend Follow", **updates):
@@ -86,19 +86,21 @@ def candidate(key="BTCUSDT:2700000:3600000:Buy:Trend Follow", **updates):
         "takeProfitReference": 102.0,
         "qty": "10",
         "notional": "1000",
-        "requiredInitialMarginUsdt": 200.0,
+        "requiredInitialMarginUsdt": 100.0,
         "marginMode": "ISOLATED",
-        "leverage": 5,
+        "leverage": 10,
         "positionSizingStatus": "SIZING_APPROVED",
         "sizingApproved": True,
         "executionStatus": "AWAITING_NODE_EXECUTION",
         "nodeExecutionRequirements": {
             "marginMode": "ISOLATED",
-            "leverage": 5,
+            "leverage": 10,
+            "maximumLeverage": 10,
             "revalidateWalletAndInstrumentRules": True,
             "submitOnlyAfterRevalidation": True,
         },
         "orderSubmitted": False,
+        "tradeRejected": False,
     }
     row.update(updates)
     return row
@@ -107,7 +109,7 @@ def candidate(key="BTCUSDT:2700000:3600000:Buy:Trend Follow", **updates):
 def sizing_snapshot(*rows):
     return {
         "status": "ready" if rows else "empty",
-        "inputFingerprint": "step8:fingerprint",
+        "inputFingerprint": "sizing:fingerprint",
         "approvedSizingQueue": list(rows),
         "approvedSizingQueueSize": len(rows),
     }
@@ -120,7 +122,7 @@ def reset_outbox():
     outbox._reset_for_tests()
 
 
-def test_publisher_inserts_exact_immutable_step8_payload_without_order_side_effect():
+def test_publisher_inserts_exact_immutable_sizing_payload_without_order_side_effect():
     core = CoreStub()
     outbox.install(core)
 
@@ -128,12 +130,12 @@ def test_publisher_inserts_exact_immutable_step8_payload_without_order_side_effe
 
     assert result["status"] == "ready"
     assert result["metrics"]["published"] == 1
+    assert result["metrics"]["blocked"] == 0
     assert result["metrics"]["claimOperations"] == 0
     assert result["orderSubmissions"] == 0
+    assert result["tradeRejectionAuthority"] is False
     assert core.order_calls == 0
-    stored = core._durable_state_store.get_execution_command(
-        candidate()["candidateKey"]
-    )
+    stored = core._durable_state_store.get_execution_command(candidate()["candidateKey"])
     assert stored["state"] == "AVAILABLE"
     assert stored["slotId"] is None
     assert stored["ownerId"] is None
@@ -151,10 +153,11 @@ def test_duplicate_publish_is_idempotent_and_never_overwrites_payload():
     assert first["metrics"]["published"] == 1
     assert second["metrics"]["idempotentDuplicates"] == 1
     assert second["rows"][0]["code"] == "COMMAND_ALREADY_EXISTS"
+    assert second["rows"][0]["tradeRejected"] is False
     assert store.get_execution_command(original["candidateKey"])["payload"] == original
 
 
-def test_same_candidate_key_with_different_payload_fails_closed():
+def test_same_candidate_key_with_different_payload_waits_for_reconciliation_without_trade_rejection():
     store = MemoryOutboxStore()
     original = candidate()
     store.publish_execution_command(original["candidateKey"], original, created_at=1)
@@ -163,24 +166,32 @@ def test_same_candidate_key_with_different_payload_fails_closed():
 
     result = outbox.build(core, now=5000)
 
+    assert result["status"] == "degraded"
     assert result["metrics"]["immutableConflicts"] == 1
+    assert result["metrics"]["blocked"] == 0
+    assert result["rows"][0]["state"] == "WAIT_RETRY"
     assert result["rows"][0]["code"] == "IMMUTABLE_PAYLOAD_CONFLICT"
+    assert result["rows"][0]["tradeRejected"] is False
     assert result["lastError"]
     assert store.get_execution_command(original["candidateKey"])["payload"] == original
 
 
-def test_invalid_step8_contract_is_blocked_before_publish():
+def test_invalid_sizing_contract_waits_before_publish_without_trade_rejection():
     store = MemoryOutboxStore()
     core = CoreStub(store=store, rows=[candidate(marginMode="CROSS")])
 
     result = outbox.build(core, now=5000)
 
-    assert result["metrics"]["blocked"] == 1
-    assert result["rows"][0]["code"] == "INVALID_SIZING_CONTRACT"
+    assert result["status"] == "degraded"
+    assert result["metrics"]["blocked"] == 0
+    assert result["metrics"]["waitingRetry"] == 1
+    assert result["rows"][0]["state"] == "WAIT_RETRY"
+    assert result["rows"][0]["code"] == "EXECUTION_PAYLOAD_NOT_READY"
+    assert result["rows"][0]["tradeRejected"] is False
     assert store.commands == {}
 
 
-def test_unavailable_or_non_postgres_store_fails_closed():
+def test_unavailable_or_non_postgres_store_is_degraded_support_not_trade_rejection():
     class BadStore(MemoryOutboxStore):
         def status(self):
             return {"ok": False, "degraded": True, "backend": "memory"}
@@ -189,8 +200,28 @@ def test_unavailable_or_non_postgres_store_fails_closed():
 
     result = outbox.build(core, now=5000)
 
-    assert result["status"] == "error"
+    assert result["status"] == "degraded"
+    assert result["metrics"]["blocked"] == 0
+    assert result["metrics"]["waitingRetry"] == 1
+    assert result["rows"][0]["state"] == "WAIT_RETRY"
+    assert result["rows"][0]["tradeRejected"] is False
     assert "PostgreSQL" in result["lastError"]
+
+
+def test_outbox_accepts_isolated_leverage_up_to_10x():
+    core = CoreStub(rows=[candidate(leverage=7, nodeExecutionRequirements={
+        "marginMode": "ISOLATED",
+        "leverage": 7,
+        "maximumLeverage": 10,
+        "revalidateWalletAndInstrumentRules": True,
+        "submitOnlyAfterRevalidation": True,
+    })])
+
+    result = outbox.build(core, now=5000)
+
+    assert result["status"] == "ready"
+    assert result["metrics"]["published"] == 1
+    assert result["metrics"]["blocked"] == 0
 
 
 def test_step9_migration_and_claim_contract_are_registered():
