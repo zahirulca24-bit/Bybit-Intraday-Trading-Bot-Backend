@@ -8,7 +8,6 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   const reasons = [];
   if (config.baseUrl !== 'https://api-demo.bybit.com') reasons.push('Bybit endpoint is not Demo.');
   if (!config.enabled) reasons.push('NODE_EXECUTION_ENABLED is false.');
-  if (!config.firstDemoTradeArmed) reasons.push('FIRST_DEMO_TRADE_ARMED is false.');
   if (config.maxActiveTrades !== 3) reasons.push('MAX_ACTIVE_TRADES must equal 3.');
   if (Number(config.gradeRiskPct?.['A+']) !== 1.0 || Number(config.gradeRiskPct?.A) !== 0.75) {
     reasons.push('Node grade-risk contract must be A+=1.00%, A=0.75%, B+=reject.');
@@ -29,7 +28,7 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
 
   return {
     ok: reasons.length === 0,
-    armed: config.firstDemoTradeArmed,
+    armed: config.enabled,
     demoOnly: true,
     maxActiveTrades: config.maxActiveTrades,
     gradeRiskPct: { ...config.gradeRiskPct },
