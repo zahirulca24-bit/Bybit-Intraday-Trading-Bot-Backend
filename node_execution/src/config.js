@@ -20,7 +20,6 @@ export function loadConfig(env = process.env) {
     throw new Error('NODE_EXECUTION_OWNER_ID must be a stable 3-80 character identifier');
   }
   const enabled = String(env.NODE_EXECUTION_ENABLED || 'true').toLowerCase() === 'true';
-  const firstDemoTradeArmed = String(env.FIRST_DEMO_TRADE_ARMED || 'true').toLowerCase() === 'true';
   const maxActiveTrades = Math.trunc(boundedNumber(env, 'MAX_ACTIVE_TRADES', 3, 3, 3));
   const gradeRiskPct = Object.freeze({ 'A+': 1.0, A: 0.75 });
   return Object.freeze({
@@ -30,7 +29,6 @@ export function loadConfig(env = process.env) {
     baseUrl,
     ownerId,
     enabled,
-    firstDemoTradeArmed,
     maxActiveTrades,
     gradeRiskPct,
     port: Math.trunc(boundedNumber(env, 'PORT', 8080, 1, 65535)),
