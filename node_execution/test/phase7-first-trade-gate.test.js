@@ -8,7 +8,7 @@ function config(overrides = {}) {
     enabled: true,
     firstDemoTradeArmed: true,
     maxActiveTrades: 3,
-    riskPerTradePct: 0.25,
+    gradeRiskPct: { 'A+': 1.0, A: 0.75 },
     ...overrides,
   };
 }
@@ -28,14 +28,15 @@ function repository(active = []) {
   };
 }
 
-test('clean Demo account arms three controlled execution slots', async () => {
+test('clean Demo account arms three controlled execution slots with grade-based risk policy', async () => {
   const result = await evaluateFirstTradeGate({ bybit: bybit(), repository: repository(), config: config() });
   assert.equal(result.ok, true);
   assert.equal(result.openPositionCount, 0);
   assert.equal(result.openOrderCount, 0);
   assert.equal(result.activeCommandCount, 0);
   assert.equal(result.maxActiveTrades, 3);
-  assert.equal(result.riskPerTradePct, 0.25);
+  assert.deepEqual(result.gradeRiskPct, { 'A+': 1.0, A: 0.75 });
+  assert.equal(result.bPlusRejected, true);
 });
 
 test('gate remains fail-closed unless separately armed', async () => {
@@ -50,6 +51,16 @@ test('gate rejects an invalid active-trade contract', async () => {
   assert.match(result.reasons.join(' '), /MAX_ACTIVE_TRADES must equal 3/);
 });
 
+test('gate rejects an invalid grade-risk configuration', async () => {
+  const result = await evaluateFirstTradeGate({
+    bybit: bybit(),
+    repository: repository(),
+    config: config({ gradeRiskPct: { 'A+': 0.25, A: 0.25 } }),
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join(' '), /A\+=1\.00%, A=0\.75%, B\+=reject/);
+});
+
 test('open exchange truth or unresolved database command blocks activation', async () => {
   const result = await evaluateFirstTradeGate({
     bybit: bybit({ positions: [{ size: '0.01' }], orders: [{ orderStatus: 'New' }] }),
@@ -62,9 +73,49 @@ test('open exchange truth or unresolved database command blocks activation', asy
   assert.equal(result.activeCommandCount, 1);
 });
 
-test('first candidate must be A or A+, execution-qualified, and exactly 0.25 percent risk', () => {
-  const approved = { payload: { grade: 'A+', executionStatus: 'AWAITING_NODE_EXECUTION', riskPerTradePct: 0.25 } };
+test('A+ candidate accepts up to 1.00 percent effective risk', () => {
+  const approved = {
+    payload: {
+      grade: 'A+',
+      executionStatus: 'AWAITING_NODE_EXECUTION',
+      gradeRiskPct: 1.0,
+      effectiveRiskPerTradePct: 1.0,
+    },
+  };
   assert.equal(assertFirstTradeCandidate(approved, config()), true);
-  assert.throws(() => assertFirstTradeCandidate({ payload: { grade: 'B+', executionStatus: 'AWAITING_NODE_EXECUTION', riskPerTradePct: 0.25 } }, config()), /A\+ or A/);
-  assert.throws(() => assertFirstTradeCandidate({ payload: { grade: 'A', executionStatus: 'AWAITING_NODE_EXECUTION', riskPerTradePct: 0.5 } }, config()), /0.25/);
+  assert.equal(assertFirstTradeCandidate({
+    payload: { ...approved.payload, effectiveRiskPerTradePct: 0.5 },
+  }, config()), true);
+  assert.throws(() => assertFirstTradeCandidate({
+    payload: { ...approved.payload, effectiveRiskPerTradePct: 1.01 },
+  }, config()), /no greater than 1\.00%/);
+});
+
+test('A candidate accepts up to 0.75 percent effective risk', () => {
+  const approved = {
+    payload: {
+      grade: 'A',
+      executionStatus: 'AWAITING_NODE_EXECUTION',
+      gradeRiskPct: 0.75,
+      effectiveRiskPerTradePct: 0.75,
+    },
+  };
+  assert.equal(assertFirstTradeCandidate(approved, config()), true);
+  assert.throws(() => assertFirstTradeCandidate({
+    payload: { ...approved.payload, gradeRiskPct: 1.0 },
+  }, config()), /requires A at 0\.75%/);
+  assert.throws(() => assertFirstTradeCandidate({
+    payload: { ...approved.payload, effectiveRiskPerTradePct: 0.8 },
+  }, config()), /no greater than 0\.75%/);
+});
+
+test('B+ candidate is rejected even when execution-qualified', () => {
+  assert.throws(() => assertFirstTradeCandidate({
+    payload: {
+      grade: 'B+',
+      executionStatus: 'AWAITING_NODE_EXECUTION',
+      gradeRiskPct: 0.5,
+      effectiveRiskPerTradePct: 0.5,
+    },
+  }, config()), /B\+ is rejected/);
 });

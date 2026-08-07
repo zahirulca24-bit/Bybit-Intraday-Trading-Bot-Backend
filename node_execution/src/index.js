@@ -123,7 +123,7 @@ async function coordinator() {
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      console.log(JSON.stringify({ level: 'info', event: 'controlled_demo_execution_ready', ownerId: config.ownerId, riskPerTradePct: config.riskPerTradePct, maxActiveTrades: config.maxActiveTrades }));
+      console.log(JSON.stringify({ level: 'info', event: 'controlled_demo_execution_ready', ownerId: config.ownerId, gradeRiskPct: config.gradeRiskPct, maxActiveTrades: config.maxActiveTrades }));
       await Promise.all([1, 2, 3].map((slotId) => slotLoop(slotId)));
 
       workersStarted = false;
