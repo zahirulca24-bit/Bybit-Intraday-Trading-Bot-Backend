@@ -7,7 +7,7 @@ function config(overrides = {}) {
     baseUrl: 'https://api-demo.bybit.com',
     enabled: true,
     maxActiveTrades: 3,
-    gradeRiskPct: { 'A+': 1.0, A: 0.75 },
+    gradeRiskPct: { 'A+': 1.0, A: 1.0 },
     ...overrides,
   };
 }
@@ -33,7 +33,7 @@ test('clean Demo account enables three controlled execution slots with grade-bas
   assert.equal(result.openOrderCount, 0);
   assert.equal(result.activeCommandCount, 0);
   assert.equal(result.maxActiveTrades, 3);
-  assert.deepEqual(result.gradeRiskPct, { 'A+': 1.0, A: 0.75 });
+  assert.deepEqual(result.gradeRiskPct, { 'A+': 1.0, A: 1.0 });
   assert.equal(result.bPlusRejected, true);
 });
 
@@ -53,7 +53,7 @@ test('gate rejects an invalid active-trade contract', async () => {
 test('gate rejects an invalid grade-risk configuration', async () => {
   const result = await evaluateFirstTradeGate({ bybit: bybit(), repository: repository(), config: config({ gradeRiskPct: { 'A+': 0.25, A: 0.25 } }) });
   assert.equal(result.ok, false);
-  assert.match(result.reasons.join(' '), /A\+=1\.00%, A=0\.75%, B\+=reject/);
+  assert.match(result.reasons.join(' '), /A\+=1\.00%, A=1\.00%, B\+=reject/);
 });
 
 test('open exchange truth or unresolved database command blocks activation', async () => {
@@ -75,11 +75,12 @@ test('A+ candidate accepts up to 1.00 percent effective risk', () => {
   assert.throws(() => assertFirstTradeCandidate({ payload: { ...approved.payload, effectiveRiskPerTradePct: 1.01 } }, config()), /no greater than 1\.00%/);
 });
 
-test('A candidate accepts up to 0.75 percent effective risk', () => {
-  const approved = { payload: { grade: 'A', executionStatus: 'AWAITING_NODE_EXECUTION', gradeRiskPct: 0.75, effectiveRiskPerTradePct: 0.75 } };
+test('A candidate accepts up to 1.00 percent effective risk', () => {
+  const approved = { payload: { grade: 'A', executionStatus: 'AWAITING_NODE_EXECUTION', gradeRiskPct: 1.0, effectiveRiskPerTradePct: 1.0 } };
   assert.equal(assertFirstTradeCandidate(approved, config()), true);
-  assert.throws(() => assertFirstTradeCandidate({ payload: { ...approved.payload, gradeRiskPct: 1.0 } }, config()), /requires A at 0\.75%/);
-  assert.throws(() => assertFirstTradeCandidate({ payload: { ...approved.payload, effectiveRiskPerTradePct: 0.8 } }, config()), /no greater than 0\.75%/);
+  assert.equal(assertFirstTradeCandidate({ payload: { ...approved.payload, effectiveRiskPerTradePct: 0.5 } }, config()), true);
+  assert.throws(() => assertFirstTradeCandidate({ payload: { ...approved.payload, gradeRiskPct: 0.75 } }, config()), /requires A at 1\.00%/);
+  assert.throws(() => assertFirstTradeCandidate({ payload: { ...approved.payload, effectiveRiskPerTradePct: 1.01 } }, config()), /no greater than 1\.00%/);
 });
 
 test('B+ candidate is rejected even when execution-qualified', () => {

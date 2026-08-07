@@ -9,8 +9,8 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   if (config.baseUrl !== 'https://api-demo.bybit.com') reasons.push('Bybit endpoint is not Demo.');
   if (!config.enabled) reasons.push('NODE_EXECUTION_ENABLED is false.');
   if (config.maxActiveTrades !== 3) reasons.push('MAX_ACTIVE_TRADES must equal 3.');
-  if (Number(config.gradeRiskPct?.['A+']) !== 1.0 || Number(config.gradeRiskPct?.A) !== 0.75) {
-    reasons.push('Node grade-risk contract must be A+=1.00%, A=0.75%, B+=reject.');
+  if (Number(config.gradeRiskPct?.['A+']) !== 1.0 || Number(config.gradeRiskPct?.A) !== 1.0) {
+    reasons.push('Node grade-risk contract must be A+=1.00%, A=1.00%, B+=reject.');
   }
 
   const [positionsResponse, ordersResponse, activeResult] = await Promise.all([
