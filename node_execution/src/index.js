@@ -17,7 +17,7 @@ const runtime = {
   migrationVersion: 0,
   startedAt: new Date().toISOString(),
   lastError: null,
-  firstTradeGate: { ok: false, armed: config.firstDemoTradeArmed, reasons: ['Preflight has not run.'] },
+  firstTradeGate: { ok: false, armed: config.enabled, reasons: ['Preflight has not run.'] },
   slots: Object.fromEntries([1, 2, 3].map((slotId) => [slotId, { state: 'IDLE', candidateKey: null, updatedAt: null }])),
 };
 
@@ -112,7 +112,7 @@ async function coordinator() {
       runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config });
       if (!runtime.firstTradeGate.ok) {
         runtime.ready = false;
-        runtime.lastError = `First Demo trade gate blocked: ${runtime.firstTradeGate.reasons.join(' ')}`;
+        runtime.lastError = `Execution preflight blocked: ${runtime.firstTradeGate.reasons.join(' ')}`;
         await repository.releaseLeadership().catch(() => undefined);
         await sleep(config.pollMs);
         continue;
