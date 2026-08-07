@@ -10,7 +10,9 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
   if (!config.enabled) reasons.push('NODE_EXECUTION_ENABLED is false.');
   if (!config.firstDemoTradeArmed) reasons.push('FIRST_DEMO_TRADE_ARMED is false.');
   if (config.maxActiveTrades !== 3) reasons.push('MAX_ACTIVE_TRADES must equal 3.');
-  if (config.riskPerTradePct !== 0.25) reasons.push('FIRST_DEMO_RISK_PER_TRADE_PCT must equal 0.25.');
+  if (Number(config.gradeRiskPct?.['A+']) !== 1.0 || Number(config.gradeRiskPct?.A) !== 0.75) {
+    reasons.push('Node grade-risk contract must be A+=1.00%, A=0.75%, B+=reject.');
+  }
 
   const [positionsResponse, ordersResponse, activeResult] = await Promise.all([
     bybit.positions(),
@@ -30,7 +32,8 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
     armed: config.firstDemoTradeArmed,
     demoOnly: true,
     maxActiveTrades: config.maxActiveTrades,
-    riskPerTradePct: config.riskPerTradePct,
+    gradeRiskPct: { ...config.gradeRiskPct },
+    bPlusRejected: true,
     openPositionCount: openPositions.length,
     openOrderCount: openOrders.length,
     activeCommandCount: activeCommands.length,
@@ -40,11 +43,21 @@ export async function evaluateFirstTradeGate({ bybit, repository, config }) {
 
 export function assertFirstTradeCandidate(command, config) {
   const payload = command?.payload || {};
-  const grade = String(payload.grade || payload.signalGrade || '').toUpperCase();
+  const grade = String(payload.grade || payload.qualityGrade || payload.signalGrade || '').toUpperCase();
   const qualified = payload.qualified === true || String(payload.executionStatus || '').toUpperCase() === 'AWAITING_NODE_EXECUTION';
-  const riskPct = Number(payload.riskPerTradePct ?? payload.riskPct ?? config.riskPerTradePct);
-  if (!['A+', 'A'].includes(grade)) throw new Error('First Demo trade requires an A+ or A signal grade.');
-  if (!qualified) throw new Error('First Demo trade candidate is not execution-qualified.');
-  if (Math.abs(riskPct - config.riskPerTradePct) > 1e-9) throw new Error('First Demo trade risk must equal 0.25%.');
+  const expectedGradeRiskPct = Number(config.gradeRiskPct?.[grade]);
+  const payloadGradeRiskPct = Number(payload.gradeRiskPct);
+  const effectiveRiskPct = Number(payload.effectiveRiskPerTradePct ?? payload.riskPerTradePct ?? payload.riskPct);
+
+  if (!['A+', 'A'].includes(grade) || !Number.isFinite(expectedGradeRiskPct)) {
+    throw new Error('Node execution requires an A+ or A signal grade; B+ is rejected.');
+  }
+  if (!qualified) throw new Error('Node execution candidate is not execution-qualified.');
+  if (!Number.isFinite(payloadGradeRiskPct) || Math.abs(payloadGradeRiskPct - expectedGradeRiskPct) > 1e-9) {
+    throw new Error(`Node grade-risk contract requires ${grade} at ${expectedGradeRiskPct.toFixed(2)}%.`);
+  }
+  if (!Number.isFinite(effectiveRiskPct) || effectiveRiskPct <= 0 || effectiveRiskPct - expectedGradeRiskPct > 1e-9) {
+    throw new Error(`Node effective risk for ${grade} must be positive and no greater than ${expectedGradeRiskPct.toFixed(2)}%.`);
+  }
   return true;
 }
