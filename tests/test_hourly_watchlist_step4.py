@@ -64,25 +64,28 @@ class FakeCore:
         return candles[-limit:], "OK"
 
 
-class Worker:
-    @staticmethod
-    def classify_trend(candles):
-        last = candles[-1]
-        return last["trend"], float(last["score"]), "existing worker trend"
+def fresh_worker():
+    class Worker:
+        @staticmethod
+        def classify_trend(candles):
+            last = candles[-1]
+            return last["trend"], float(last["score"]), "existing worker trend"
 
-    @staticmethod
-    def _rank_rows(rows):
-        for row in rows:
-            row["rankScore"] = float(row["trendScore"])
-        return sorted(rows, key=lambda row: row["rankScore"], reverse=True)
+        @staticmethod
+        def _rank_rows(rows):
+            for row in rows:
+                row["rankScore"] = float(row["trendScore"])
+            return sorted(rows, key=lambda row: row["rankScore"], reverse=True)
 
-    @staticmethod
-    def run_batch(core, now=None):
-        return {"status": "base"}
+        @staticmethod
+        def run_batch(core, now=None):
+            return {"status": "base"}
 
-    @staticmethod
-    def snapshot():
-        return {"status": "base"}
+        @staticmethod
+        def snapshot():
+            return {"status": "base"}
+
+    return Worker
 
 
 class HourlyWatchlistTests(unittest.TestCase):
@@ -95,7 +98,8 @@ class HourlyWatchlistTests(unittest.TestCase):
     def test_direct_market_to_closed_1h_top20(self):
         now = int(datetime(2026, 8, 3, 10, 5, tzinfo=timezone.utc).timestamp())
         core = FakeCore(now)
-        hourly_watchlist.install(core, Worker)
+        worker = fresh_worker()
+        hourly_watchlist.install(core, worker)
         result = hourly_watchlist.build(core, now=now)
 
         self.assertEqual(result["status"], "ready")
@@ -113,7 +117,8 @@ class HourlyWatchlistTests(unittest.TestCase):
         core = FakeCore(now)
         self.assertFalse(hasattr(core, "daily_master_universe"))
         self.assertFalse(hasattr(core, "four_hour_directional_pool"))
-        hourly_watchlist.install(core, Worker)
+        worker = fresh_worker()
+        hourly_watchlist.install(core, worker)
         result = hourly_watchlist.build(core, now=now)
         self.assertEqual(result["status"], "ready")
 
