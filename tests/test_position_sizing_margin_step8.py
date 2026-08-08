@@ -303,6 +303,23 @@ def test_real_available_margin_can_reduce_quantity_before_exchange_submission():
     assert core.order_calls == 0
 
 
+def test_blank_demo_wallet_available_balance_uses_equity_remainder():
+    core = CoreStub()
+    account = core.wallet["result"]["list"][0]
+    account["totalEquity"] = "960.00391034"
+    account["totalAvailableBalance"] = ""
+    account["totalInitialMargin"] = ""
+    sizing.install(core, setup_worker)
+
+    approved = sizing.build(core, now=5000)["approvedSizingQueue"][0]
+
+    wallet = approved["sizingDecision"]["checks"]["riskAndMargin"]
+    assert approved["positionSizingStatus"] == "SIZING_APPROVED"
+    assert wallet["availableMargin"] == 960.00391034
+    assert wallet["availableMarginFallbackApplied"] is True
+    assert wallet["availableMarginSource"] == "EQUITY_MINUS_CURRENT_INITIAL_MARGIN"
+
+
 def test_bybit_min_notional_waits_instead_of_rejecting_trade():
     core = CoreStub()
     core.wallet["result"]["list"][0]["totalAvailableBalance"] = "1"
