@@ -1,8 +1,13 @@
 import { orderLinkId } from './bybitClient.js';
-import { validateContract, revalidateLive } from './validator.js';
+import { validateCandidateFacts, validateContract, revalidateLive } from './validator.js';
+import { buildLiveExecutionPlan, ExecutionWaitError } from './liveSizer.js';
 
 function rows(response) {
   return Array.isArray(response?.result?.list) ? response.result.list : [];
+}
+
+function legacySized(payload) {
+  return payload?.positionSizingStatus === 'SIZING_APPROVED' && payload?.sizingApproved === true;
 }
 
 export class CommandExecutor {
@@ -13,14 +18,14 @@ export class CommandExecutor {
   }
 
   async execute(command) {
-    const payload = validateContract(command.payload, command.candidateKey);
+    let payload = validateContract(command.payload, command.candidateKey);
     const linkId = orderLinkId(command.candidateKey);
 
     if (command.state === 'ORDER_PENDING') {
       return this.resolvePending(command, payload, linkId);
     }
     if (command.state !== 'RESERVED') {
-      throw new Error(`Step 10 cannot execute command state ${command.state}`);
+      throw new Error(`Node execution cannot execute command state ${command.state}`);
     }
 
     try {
@@ -30,13 +35,20 @@ export class CommandExecutor {
         return this.resolvePending(command, payload, linkId);
       }
 
-      await this.finalRevalidation(command, payload, linkId);
-      await this.ensureAccountSettings(payload.symbol);
-      const finalTruth = await this.finalRevalidation(command, payload, linkId);
+      payload = await this.prepareLiveExecution(command, payload, linkId);
+      await this.ensureAccountSettings(payload.symbol, payload.leverage);
+      payload = await this.prepareLiveExecution(command, payload, linkId);
+      command.payload = payload;
+      if (typeof this.repository.markExecutionPayload === 'function') {
+        this.repository.markExecutionPayload(command, payload);
+      }
 
       await this.repository.recordOrder(command, 'SUBMISSION_INTENT', {
         orderLinkId: linkId,
-        finalRevalidation: finalTruth,
+        nodeSizingStatus: payload.nodeSizingStatus || 'LEGACY_REVALIDATED',
+        sizingAuthority: payload.sizingAuthority || 'LEGACY_PRECALCULATED_WITH_LIVE_REVALIDATION',
+        riskBudgetUsdt: payload.riskBudgetUsdt ?? null,
+        plannedStopRiskUsdt: payload.plannedStopRiskUsdt ?? null,
         submissionAttemptedAt: Date.now(),
       });
       command = await this.repository.transition(command, 'ORDER_PENDING');
@@ -90,6 +102,26 @@ export class CommandExecutor {
       });
       return this.resolvePending(command, payload, linkId);
     } catch (error) {
+      if (command.state === 'RESERVED' && error instanceof ExecutionWaitError) {
+        await this.repository.recordOrder(command, 'NODE_EXECUTION_WAIT', {
+          orderLinkId: linkId,
+          code: error.code,
+          reason: error.message,
+          retryable: error.retryable,
+        }).catch(() => undefined);
+        if (error.retryable) {
+          return {
+            ...command,
+            state: 'RESERVED',
+            nodeExecutionWait: {
+              code: error.code,
+              reason: error.message,
+              retryable: true,
+            },
+          };
+        }
+        return this.repository.transition(command, 'FAILED');
+      }
       if (command.state === 'RESERVED') {
         await this.repository.recordOrder(command, 'PRE_SUBMISSION_BLOCKED', {
           orderLinkId: linkId,
@@ -101,7 +133,7 @@ export class CommandExecutor {
     }
   }
 
-  async ensureAccountSettings(symbol) {
+  async ensureAccountSettings(symbol, leverage = this.config.leverage) {
     const before = await this.bybit.accountInfo();
     const current = String(before?.result?.marginMode || '');
     if (current !== this.config.marginMode) {
@@ -111,7 +143,7 @@ export class CommandExecutor {
         throw new Error('Bybit account margin mode is not verified as ISOLATED_MARGIN');
       }
     }
-    await this.bybit.setLeverage(symbol, this.config.leverage);
+    await this.bybit.setLeverage(symbol, Math.min(10, Number(leverage || this.config.leverage)));
   }
 
   async hasExchangeEvidence(symbol, linkId) {
@@ -122,24 +154,51 @@ export class CommandExecutor {
     return Boolean(order) || rows(executionResponse).some((row) => Number(row.execQty || 0) > 0);
   }
 
-  async finalRevalidation(command, payload, linkId) {
-    const [wallet, instrument, ticker, positions, activeOrders, pendingReservedMargin] = await Promise.all([
+  async liveTruth(command, payload, linkId) {
+    const klinePromise = typeof this.bybit.klines === 'function'
+      ? this.bybit.klines(payload.symbol, '15', Math.max(80, Number(this.config.structureLookback || 12) + 10))
+      : Promise.resolve(null);
+    const [wallet, instrument, ticker, positions, activeOrders, kline15m, pendingReservedMargin] = await Promise.all([
       this.bybit.wallet(),
       this.bybit.instrument(payload.symbol),
       this.bybit.ticker(payload.symbol),
       this.bybit.positions(),
       this.bybit.activeOrders(payload.symbol),
+      klinePromise,
       this.repository.pendingReservedMargin(command.candidateKey),
     ]);
-    return revalidateLive(payload, {
+    return {
       wallet,
       instrument,
       ticker,
       positions,
       activeOrders,
+      kline15m,
       pendingReservedMargin,
       orderLinkId: linkId,
-    }, this.config);
+    };
+  }
+
+  async prepareLiveExecution(command, payload, linkId) {
+    validateCandidateFacts(payload, command.candidateKey);
+    const truth = await this.liveTruth(command, payload, linkId);
+
+    // Compatibility for old tests/old command rows that predate Node kline
+    // support. Current production BybitClient always supplies klines, so both
+    // direct and PostgreSQL inputs use Node live sizing in the canonical path.
+    if (!truth.kline15m && legacySized(payload)) {
+      revalidateLive(payload, truth, this.config);
+      return payload;
+    }
+    if (!truth.kline15m) {
+      throw new ExecutionWaitError('TECHNICAL_PLAN_WAIT', 'Closed 15M market data is unavailable');
+    }
+    return buildLiveExecutionPlan(payload, truth, this.config);
+  }
+
+  async finalRevalidation(command, payload, linkId) {
+    const truth = await this.liveTruth(command, payload, linkId);
+    return revalidateLive(payload, truth, this.config);
   }
 
   async resolvePending(command, payload, linkId) {
