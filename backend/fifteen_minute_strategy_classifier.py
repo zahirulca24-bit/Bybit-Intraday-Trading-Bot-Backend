@@ -1,4 +1,4 @@
-"""Persistent closed-15M strategy classification for the hourly Top-20 watchlist."""
+"""Persistent closed-15M strategy classification for the hourly Top-50 watchlist."""
 from __future__ import annotations
 
 import threading
@@ -16,6 +16,7 @@ _PERSIST_KEY = "fifteen_minute_strategy_classification_v1"
 _INTERVAL = "15"
 _ENTRY_INTERVAL = "5"
 _INTERVAL_SECONDS = 15 * 60
+_MAX_WATCHLIST_ROWS = 50
 _STATE_LOCK = threading.RLock()
 _BUILD_LOCK = threading.Lock()
 _STORE: Any | None = None
@@ -25,8 +26,8 @@ _ACTIONABLE_VOTE: Callable[[list[dict[str, Any]], str], dict[str, Any] | None] |
 
 _STATE: dict[str, Any] = {
     "status": "idle",
-    "version": 1,
-    "source": "hourly_top20_closed_15m_strategy_classification",
+    "version": 2,
+    "source": "hourly_top50_closed_15m_strategy_classification",
     "fifteenMinuteCandleTime": None,
     "updatedAt": 0,
     "symbols": [],
@@ -44,8 +45,8 @@ def _target_candle_open_seconds(timestamp: int) -> int:
 def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
     return {
         "status": status_override or str(_STATE.get("status") or "idle"),
-        "version": int(_STATE.get("version") or 1),
-        "source": str(_STATE.get("source") or "hourly_top20_closed_15m_strategy_classification"),
+        "version": int(_STATE.get("version") or 2),
+        "source": str(_STATE.get("source") or "hourly_top50_closed_15m_strategy_classification"),
         "fifteenMinuteCandleTime": _STATE.get("fifteenMinuteCandleTime"),
         "updatedAt": int(_STATE.get("updatedAt") or 0),
         "symbols": list(_STATE.get("symbols") or []),
@@ -91,15 +92,15 @@ def _load_persisted() -> None:
     raw_symbols, raw_rows = saved.get("symbols"), saved.get("rows")
     if not isinstance(raw_symbols, list) or not isinstance(raw_rows, list):
         return
-    symbols = [str(v or "").upper() for v in raw_symbols if str(v or "").strip()]
-    rows = [dict(row) for row in raw_rows if isinstance(row, dict)]
+    symbols = [str(v or "").upper() for v in raw_symbols if str(v or "").strip()][:_MAX_WATCHLIST_ROWS]
+    rows = [dict(row) for row in raw_rows if isinstance(row, dict)][:_MAX_WATCHLIST_ROWS]
     if bool(symbols) != bool(rows):
         return
     with _STATE_LOCK:
         _STATE.update({
             "status": str(saved.get("status") or ("ready" if rows else "empty")),
-            "version": int(saved.get("version") or 1),
-            "source": str(saved.get("source") or "hourly_top20_closed_15m_strategy_classification"),
+            "version": 2,
+            "source": "hourly_top50_closed_15m_strategy_classification",
             "fifteenMinuteCandleTime": saved.get("fifteenMinuteCandleTime"),
             "updatedAt": int(saved.get("updatedAt") or 0),
             "symbols": symbols,
@@ -131,6 +132,28 @@ def _hourly_snapshot(core: Any) -> dict[str, Any]:
             if isinstance(payload, dict):
                 return dict(payload)
     return {}
+
+
+def _current_hourly_rows(upstream: dict[str, Any]) -> list[dict[str, Any]]:
+    active_symbols = {
+        str(value or "").upper()
+        for value in upstream.get("symbols") or upstream.get("activeSymbols") or []
+        if str(value or "").strip()
+    }
+    candle_time = int(upstream.get("oneHourCandleTime") or 0)
+    current: list[dict[str, Any]] = []
+    for raw in upstream.get("rows") or []:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        symbol = str(row.get("symbol") or "").upper()
+        row_candle = int(row.get("oneHourCandleTime") or 0)
+        if not symbol or (active_symbols and symbol not in active_symbols):
+            continue
+        if candle_time > 0 and row_candle != candle_time:
+            continue
+        current.append(row)
+    return current[:_MAX_WATCHLIST_ROWS]
 
 
 def _minimum_closed_candles() -> int:
@@ -254,13 +277,13 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             return _snapshot_unlocked("busy")
     try:
         upstream = _hourly_snapshot(core)
-        upstream_rows = [dict(row) for row in upstream.get("rows") or [] if isinstance(row, dict) and row.get("symbol")]
+        upstream_rows = _current_hourly_rows(upstream)
         if not upstream_rows:
-            raise RuntimeError("Hourly Top-20 watchlist is unavailable")
+            raise RuntimeError("Hourly Top-50 watchlist is unavailable")
         now_ms = timestamp * 1000
         rows: list[dict[str, Any]] = []
         rejected = {"missing15mHistory": 0, "stale15mCandle": 0, "unsupportedDirection": 0, "invalid5mContext": 0, "engineError": 0, "dependencyError": 0}
-        for watchlist_row in upstream_rows[:20]:
+        for watchlist_row in upstream_rows:
             row, rejection = _classify_symbol(core, watchlist_row, target_open_ms, now_ms)
             rows.append(row)
             if rejection in rejected:
@@ -268,6 +291,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
         metrics = {
             "hourlyWatchlistInput": len(upstream_rows),
             "processed": len(rows),
+            "maximumWatchlistRows": _MAX_WATCHLIST_ROWS,
             "setupClassified": sum(1 for row in rows if row.get("status") == "SETUP_CLASSIFIED"),
             "watching": sum(1 for row in rows if row.get("status") == "WATCHING"),
             "noSetup": sum(1 for row in rows if row.get("status") == "NO_SETUP"),
@@ -279,7 +303,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             "entryConfirmationPolicy": "STEP6_CLOSED_5M_REQUIRED",
             "rejected": rejected,
         }
-        payload = {"status": "ready" if rows else "empty", "version": 1, "source": "hourly_top20_closed_15m_strategy_classification", "fifteenMinuteCandleTime": target_open_ms, "updatedAt": timestamp, "symbols": [str(row.get("symbol") or "") for row in rows], "rows": rows, "metrics": metrics, "lastError": None if rows else "No watchlist symbol was classified", "persisted": False}
+        payload = {"status": "ready" if rows else "empty", "version": 2, "source": "hourly_top50_closed_15m_strategy_classification", "fifteenMinuteCandleTime": target_open_ms, "updatedAt": timestamp, "symbols": [str(row.get("symbol") or "") for row in rows], "rows": rows, "metrics": metrics, "lastError": None if rows else "No watchlist symbol was classified", "persisted": False}
         payload["persisted"] = _persist(payload)
         with _STATE_LOCK:
             _STATE.update(payload)
@@ -325,13 +349,13 @@ def install(core: Any, setup_worker: Any) -> dict[str, Any]:
 
 
 def status(core: Any | None = None) -> dict[str, Any]:
-    return {"installed": bool(core is not None and getattr(core, "_fifteen_minute_strategy_classifier_v1_installed", False)), "policy": "EVERY_CLOSED_15M_CLASSIFY_EXISTING_STRATEGIES", "usesRealFiveMinuteContext": True, "publishesClosed15mMarketMetrics": True, "createsEntryCandidate": False, "writesConfirmedQueue": False, "submitsOrder": False, "snapshot": snapshot()}
+    return {"installed": bool(core is not None and getattr(core, "_fifteen_minute_strategy_classifier_v1_installed", False)), "policy": "TOP50_EVERY_CLOSED_15M_CLASSIFY_EXISTING_STRATEGIES", "maximumWatchlistRows": _MAX_WATCHLIST_ROWS, "usesRealFiveMinuteContext": True, "publishesClosed15mMarketMetrics": True, "createsEntryCandidate": False, "writesConfirmedQueue": False, "submitsOrder": False, "snapshot": snapshot()}
 
 
 def _reset_for_tests() -> None:
     global _STORE, _SETUP_SETTINGS, _EXPECTED_SIDE, _ACTIONABLE_VOTE
     with _STATE_LOCK:
-        _STATE.update({"status": "idle", "version": 1, "source": "hourly_top20_closed_15m_strategy_classification", "fifteenMinuteCandleTime": None, "updatedAt": 0, "symbols": [], "rows": [], "metrics": {}, "lastError": None, "persisted": False})
+        _STATE.update({"status": "idle", "version": 2, "source": "hourly_top50_closed_15m_strategy_classification", "fifteenMinuteCandleTime": None, "updatedAt": 0, "symbols": [], "rows": [], "metrics": {}, "lastError": None, "persisted": False})
     _STORE = None
     _SETUP_SETTINGS = None
     _EXPECTED_SIDE = None
