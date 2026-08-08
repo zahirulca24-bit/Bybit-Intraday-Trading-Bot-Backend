@@ -116,29 +116,130 @@ def reset_risk(monkeypatch):
     risk._reset_for_tests()
 
 
-def test_existing_authorities_approve_without_sizing_or_order():
-    core = CoreStub()
+def _approved(core, now=4000):
     risk.install(core)
+    result = risk.build(core, now=now)
+    assert result["approvedRiskQueueSize"] == 1
+    return result, result["approvedRiskQueue"][0]
 
-    result = risk.build(core, now=4000)
+
+def test_valid_confirmed_a_plus_candidate_is_approved():
+    core = CoreStub()
+
+    result, approved = _approved(core)
 
     assert result["status"] == "ready"
-    assert result["approvedRiskQueueSize"] == 1
-    approved = result["approvedRiskQueue"][0]
+    assert approved["grade"] == "A+"
     assert approved["riskStatus"] == "APPROVED_RISK"
+    assert approved["riskApproved"] is True
     assert approved["riskPolicyId"] == risk.POLICY_ID
     assert approved["riskDecision"]["code"] == "RISK_APPROVED"
+
+
+def test_valid_confirmed_a_candidate_is_approved():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(grade="A", gradeScore=90.0))
+
+    _, approved = _approved(core)
+
+    assert approved["grade"] == "A"
+    assert approved["riskApproved"] is True
+
+
+def test_approved_candidate_always_has_full_risk_size_factor():
+    core = CoreStub()
+
+    _, approved = _approved(core)
+
     assert approved["riskSizeFactor"] == 1.0
-    assert approved["positionSizingStatus"] == "NOT_EVALUATED_STEP8"
-    assert approved["executionStatus"] == "AWAITING_POSITION_SIZING"
-    assert approved["orderSubmitted"] is False
-    assert result["positionSizingCalls"] == 0
-    assert result["orderSubmissions"] == 0
-    assert core.sizing_calls == 0
-    assert core.order_calls == 0
+    assert approved["riskFlags"] == []
+    assert approved["riskDecision"]["checks"]["signalRisk"]["entrySafetyOnly"] is True
 
 
-def test_authoritative_daily_risk_blocks_candidate():
+def test_one_matching_strategy_vote_does_not_reject_entry_safety():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(
+        candidate(
+            strategyStrength=1.0,
+            engineVotes=[{"engine": "Trend Follow", "signal": "Buy", "strength": 1.0}],
+        )
+    )
+
+    _, approved = _approved(core)
+
+    assert approved["riskSizeFactor"] == 1.0
+    assert approved["riskFlags"] == []
+
+
+def test_low_historical_strategy_strength_does_not_block_confirmed_candidate():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(strategyStrength=0.1))
+
+    _, approved = _approved(core)
+
+    assert approved["riskApproved"] is True
+    assert approved["riskSizeFactor"] == 1.0
+
+
+def test_one_engine_vote_in_old_half_size_band_stays_full_size():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(
+        candidate(
+            strategyStrength=2.5,
+            engineVotes=[{"engine": "Trend Follow", "signal": "Buy", "strength": 2.5}],
+        )
+    )
+
+    _, approved = _approved(core)
+
+    assert approved["riskSizeFactor"] == 1.0
+
+
+def test_one_engine_vote_in_old_three_quarter_band_stays_full_size():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(
+        candidate(
+            strategyStrength=3.5,
+            engineVotes=[{"engine": "Trend Follow", "signal": "Buy", "strength": 3.5}],
+        )
+    )
+
+    _, approved = _approved(core)
+
+    assert approved["riskSizeFactor"] == 1.0
+
+
+def test_multiple_matching_votes_do_not_change_risk_size_factor():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(
+        candidate(
+            strategyStrength=1.5,
+            engineVotes=[
+                {"engine": "Trend Follow", "signal": "Buy", "strength": 1.5},
+                {"engine": "Breakout", "signal": "Buy", "strength": 1.4},
+            ],
+        )
+    )
+
+    _, approved = _approved(core)
+
+    assert approved["riskSizeFactor"] == 1.0
+    assert approved["riskFlags"] == []
+
+
+def test_losing_streak_does_not_block_or_reduce_confirmed_candidate():
+    core = CoreStub()
+    core.BOT_STATE["consecutiveLosses"] = 4
+    core.entry_snapshot = entry_snapshot(candidate(strategyStrength=0.5))
+
+    _, approved = _approved(core)
+
+    assert approved["riskApproved"] is True
+    assert approved["riskSizeFactor"] == 1.0
+    assert approved["riskFlags"] == []
+
+
+def test_authoritative_daily_loss_risk_blocks_candidate():
     core = CoreStub()
     core.daily = {
         "ok": True,
@@ -158,7 +259,42 @@ def test_authoritative_daily_risk_blocks_candidate():
     assert core.position_calls == 0
 
 
-def test_protected_position_guard_blocks_duplicate_or_max_positions():
+def test_authoritative_max_trades_per_day_blocks_candidate():
+    core = CoreStub()
+    core.daily = {
+        "ok": True,
+        "blocked": True,
+        "newEntriesAllowed": False,
+        "lockType": "MAX_TRADES_PER_DAY",
+        "reason": "Maximum trades for the trading day reached",
+    }
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    row = result["rows"][0]
+    assert row["riskDecision"]["code"] == "MAX_TRADES_PER_DAY"
+    assert result["approvedRiskQueueSize"] == 0
+
+
+def test_same_symbol_open_is_blocked_by_protected_position_guard():
+    core = CoreStub()
+    core.position = {
+        "ok": False,
+        "reason": "Position already open for BTCUSDT",
+        "openPositions": 1,
+        "maxOpenPositions": 3,
+    }
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    row = result["rows"][0]
+    assert row["riskDecision"]["code"] == "POSITION_GUARD_BLOCKED"
+    assert "already open" in row["riskDecision"]["reason"].lower()
+
+
+def test_max_three_open_positions_is_blocked_by_protected_position_guard():
     core = CoreStub()
     core.position = {
         "ok": False,
@@ -173,19 +309,6 @@ def test_protected_position_guard_blocks_duplicate_or_max_positions():
     row = result["rows"][0]
     assert row["riskDecision"]["code"] == "POSITION_GUARD_BLOCKED"
     assert "3/3" in row["riskDecision"]["reason"]
-    assert result["approvedRiskQueueSize"] == 0
-
-
-def test_existing_signal_risk_blocks_four_loss_streak():
-    core = CoreStub()
-    core.BOT_STATE["consecutiveLosses"] = 4
-    risk.install(core)
-
-    result = risk.build(core, now=4000)
-
-    row = result["rows"][0]
-    assert row["riskDecision"]["code"] == "SIGNAL_RISK_BLOCKED"
-    assert "4 consecutive losses" in row["riskDecision"]["reason"]
     assert result["approvedRiskQueueSize"] == 0
 
 
@@ -246,6 +369,58 @@ def test_existing_candidate_age_limit_blocks_stale_entry(monkeypatch):
     freshness = row["riskDecision"]["checks"]["freshness"]
     assert freshness["ageSeconds"] == 3000
     assert freshness["maximumAgeSeconds"] == 1200
+
+
+def test_already_submitted_order_is_blocked():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(orderSubmitted=True))
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    row = result["rows"][0]
+    assert row["riskStatus"] == "BLOCKED_RISK"
+    assert row["riskDecision"]["code"] == "INVALID_CONFIRMED_ENTRY"
+    assert result["approvedRiskQueueSize"] == 0
+
+
+def test_invalid_candidate_identity_is_blocked():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(candidateKey=""))
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    row = result["rows"][0]
+    assert row["riskStatus"] == "BLOCKED_RISK"
+    assert row["riskDecision"]["code"] == "INVALID_CONFIRMED_ENTRY"
+    assert result["approvedRiskQueueSize"] == 0
+
+
+def test_non_execution_grade_is_blocked():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(grade="B+"))
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    assert result["rows"][0]["riskDecision"]["code"] == "INVALID_CONFIRMED_ENTRY"
+    assert result["approvedRiskQueueSize"] == 0
+
+
+def test_entry_safety_hands_off_to_step8_without_quantity_or_order():
+    core = CoreStub()
+
+    result, approved = _approved(core)
+
+    assert "qty" not in approved
+    assert approved["positionSizingStatus"] == "NOT_EVALUATED_STEP8"
+    assert approved["executionStatus"] == "AWAITING_POSITION_SIZING"
+    assert approved["orderSubmitted"] is False
+    assert result["positionSizingCalls"] == 0
+    assert result["orderSubmissions"] == 0
+    assert core.sizing_calls == 0
+    assert core.order_calls == 0
 
 
 def test_same_input_fingerprint_is_not_rechecked():
