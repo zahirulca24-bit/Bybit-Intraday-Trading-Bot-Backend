@@ -22,22 +22,25 @@ class MemoryStore:
 
 
 class FakeCore:
-    def __init__(self, now):
+    def __init__(self, now, count=60):
         self.now = now
+        self.count = count
         self._durable_state_store = MemoryStore()
         self.fetch_count = 0
 
     def public_bybit_get(self, path, params):
         assert path == "/v5/market/tickers"
         rows = []
-        for index in range(25):
+        for index in range(self.count):
+            last = 10 + index
             rows.append(
                 {
                     "symbol": f"COIN{index:03d}USDT",
-                    "lastPrice": str(10 + index),
+                    "lastPrice": str(last),
                     "turnover24h": str(20_000_000 + index),
-                    "bid1Price": "10.00",
-                    "ask1Price": "10.01",
+                    "bid1Price": str(last),
+                    "ask1Price": str(last + 0.001),
+                    "price24hPcnt": "0.01",
                 }
             )
         return {"retCode": 0, "result": {"list": rows}}
@@ -95,20 +98,56 @@ class HourlyWatchlistTests(unittest.TestCase):
     def tearDown(self):
         hourly_watchlist._reset_for_tests()
 
-    def test_direct_market_to_closed_1h_top20(self):
+    def test_direct_market_to_closed_1h_top50(self):
         now = int(datetime(2026, 8, 3, 10, 5, tzinfo=timezone.utc).timestamp())
-        core = FakeCore(now)
+        core = FakeCore(now, count=60)
         worker = fresh_worker()
         hourly_watchlist.install(core, worker)
         result = hourly_watchlist.build(core, now=now)
 
+        self.assertEqual(hourly_watchlist.settings()["watchlistSize"], 50)
         self.assertEqual(result["status"], "ready")
-        self.assertEqual(result["metrics"]["eligibleMarketInput"], 25)
-        self.assertEqual(result["metrics"]["oneHourQualified"], 25)
-        self.assertEqual(result["metrics"]["selected"], 20)
+        self.assertEqual(result["metrics"]["eligibleMarketInput"], 60)
+        self.assertEqual(result["metrics"]["oneHourQualified"], 60)
+        self.assertEqual(result["metrics"]["selected"], 50)
+        self.assertEqual(len(result["rows"]), 50)
         self.assertEqual(result["metrics"]["upstreamTimeframes"], ["1H"])
-        self.assertEqual(result["source"], "eligible_usdt_closed_1h_top20")
+        self.assertEqual(result["source"], "eligible_usdt_closed_1h_top50")
+        self.assertEqual(hourly_watchlist.status(worker)["policy"], "ELIGIBLE_USDT_TO_CLOSED_1H_TOP50")
         self.assertTrue(result["persisted"])
+
+    def test_legacy_top20_persistence_loads_safely(self):
+        now = int(datetime(2026, 8, 3, 11, 5, tzinfo=timezone.utc).timestamp())
+        core = FakeCore(now)
+        old_rows = [
+            {
+                "symbol": f"OLD{index:02d}USDT",
+                "trend": "BULLISH",
+                "oneHourCandleTime": 123,
+            }
+            for index in range(20)
+        ]
+        core._durable_state_store.put(
+            "hourly_watchlist_top20_v2",
+            {
+                "status": "ready",
+                "version": 2,
+                "source": "eligible_usdt_closed_1h_top20",
+                "oneHourCandleTime": 123,
+                "updatedAt": 100,
+                "symbols": [row["symbol"] for row in old_rows],
+                "rows": old_rows,
+                "metrics": {"selected": 20},
+                "lastError": None,
+            },
+        )
+        worker = fresh_worker()
+        hourly_watchlist.install(core, worker)
+        loaded = hourly_watchlist.snapshot()
+
+        self.assertEqual(len(loaded["rows"]), 20)
+        self.assertEqual(loaded["source"], "eligible_usdt_closed_1h_top50")
+        self.assertEqual(loaded["metrics"]["migratedFrom"], "hourly_watchlist_top20_v2")
 
     def test_market_source_requires_no_parent_timeframe_stage(self):
         now = int(datetime(2026, 8, 3, 11, 5, tzinfo=timezone.utc).timestamp())

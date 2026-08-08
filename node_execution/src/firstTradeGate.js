@@ -36,6 +36,19 @@ function orderIsManaged(order, commands) {
   });
 }
 
+async function activeCommands(repository, adoptedCommands) {
+  if (adoptedCommands !== null) return adoptedCommands;
+  if (typeof repository.activeCommands === 'function') return repository.activeCommands();
+  if (repository?.pool?.query) {
+    const result = await repository.pool.query(
+      'SELECT candidate_key,state,payload FROM execution_commands WHERE state = ANY($1::text[]) ORDER BY created_at',
+      [ACTIVE],
+    );
+    return result.rows || [];
+  }
+  return [];
+}
+
 export async function evaluateFirstTradeGate({ bybit, repository, config, adoptedCommands = null }) {
   const reasons = [];
   if (config.baseUrl !== 'https://api-demo.bybit.com') reasons.push('Bybit endpoint is not Demo.');
@@ -45,28 +58,29 @@ export async function evaluateFirstTradeGate({ bybit, repository, config, adopte
     reasons.push('Node grade-risk contract must be A+=1.00%, A=1.00%, B+=reject.');
   }
 
-  const activePromise = adoptedCommands === null
-    ? repository.pool.query('SELECT candidate_key,state,payload FROM execution_commands WHERE state = ANY($1::text[]) ORDER BY created_at', [ACTIVE])
-    : Promise.resolve({ rows: adoptedCommands });
-
-  const [positionsResponse, ordersResponse, activeResult] = await Promise.all([
+  const [positionsResponse, ordersResponse, activeRows] = await Promise.all([
     bybit.positions(),
     bybit.activeOrders(),
-    activePromise,
+    activeCommands(repository, adoptedCommands),
   ]);
 
   const openPositions = rows(positionsResponse).filter((row) => Number(row.size || 0) > 0);
   const openOrders = rows(ordersResponse).filter((row) => !['Filled', 'Cancelled', 'Rejected', 'Deactivated', 'Expired'].includes(String(row.orderStatus || '')));
-  const activeCommands = (activeResult.rows || []).map(normalizeCommand).filter(Boolean);
+  const active = (activeRows || []).map(normalizeCommand).filter(Boolean);
 
-  const orphanPositions = openPositions.filter((position) => !positionIsManaged(position, activeCommands));
-  const orphanOrders = openOrders.filter((order) => !orderIsManaged(order, activeCommands));
+  const orphanPositions = openPositions.filter((position) => !positionIsManaged(position, active));
+  const orphanOrders = openOrders.filter((order) => !orderIsManaged(order, active));
 
-  if (activeCommands.length > config.maxActiveTrades) {
-    reasons.push(`PostgreSQL has ${activeCommands.length} active commands; maximum is ${config.maxActiveTrades}.`);
+  if (active.length > config.maxActiveTrades) {
+    reasons.push(`Execution controller has ${active.length} active candidates; maximum is ${config.maxActiveTrades}.`);
   }
   if (orphanPositions.length) reasons.push(`Exchange has ${orphanPositions.length} orphan open position(s).`);
   if (orphanOrders.length) reasons.push(`Exchange has ${orphanOrders.length} orphan open order(s).`);
+
+  const support = typeof repository.supportSnapshot === 'function'
+    ? repository.supportSnapshot()
+    : { status: 'PASS', databaseReady: true };
+  const reconciliationRequired = !support.databaseReady && (orphanPositions.length > 0 || orphanOrders.length > 0);
 
   return {
     ok: reasons.length === 0,
@@ -75,10 +89,14 @@ export async function evaluateFirstTradeGate({ bybit, repository, config, adopte
     maxActiveTrades: config.maxActiveTrades,
     gradeRiskPct: { ...config.gradeRiskPct },
     bPlusRejected: true,
-    recoveryMode: activeCommands.length > 0,
+    recoveryMode: active.length > 0,
+    recoveryStatus: reconciliationRequired ? 'DEGRADED_RECOVERY' : 'READY',
+    recoveryCode: reconciliationRequired ? 'RECONCILIATION_REQUIRED' : null,
+    postgresSupportStatus: support.status || 'DEGRADED',
+    postgresRequiredForNewCandidate: false,
     openPositionCount: openPositions.length,
     openOrderCount: openOrders.length,
-    activeCommandCount: activeCommands.length,
+    activeCommandCount: active.length,
     managedPositionCount: openPositions.length - orphanPositions.length,
     managedOrderCount: openOrders.length - orphanOrders.length,
     orphanPositionCount: orphanPositions.length,
@@ -92,7 +110,7 @@ export function assertFirstTradeCandidate(command, config) {
   const grade = String(payload.grade || payload.qualityGrade || payload.signalGrade || '').toUpperCase();
   const qualified = payload.qualified === true || String(payload.executionStatus || '').toUpperCase() === 'AWAITING_NODE_EXECUTION';
   const expectedGradeRiskPct = Number(config.gradeRiskPct?.[grade]);
-  const payloadGradeRiskPct = Number(payload.gradeRiskPct);
+  const payloadGradeRiskPct = Number(payload.gradeRiskPct ?? payload.riskPerTradePct);
   const effectiveRiskPct = Number(payload.effectiveRiskPerTradePct ?? payload.riskPerTradePct ?? payload.riskPct);
 
   if (!['A+', 'A'].includes(grade) || !Number.isFinite(expectedGradeRiskPct)) {

@@ -87,8 +87,8 @@ def settings() -> dict[str, Any]:
         "legacyPythonExecutionEnabled": False,
         "entryConfirmationCadence": "NEW_CLOSED_5M_ON_SETUP_CYCLE",
         "riskDecisionCadence": "AFTER_CLOSED_5M_ENTRY_CONFIRMATION",
-        "positionSizingCadence": "AFTER_AUTHORITATIVE_RISK_APPROVAL",
-        "executionCommandPublishCadence": "AFTER_POSITION_SIZING_APPROVAL",
+        "executionCommandPublishCadence": "IMMEDIATELY_AFTER_AUTHORITATIVE_RISK_APPROVAL",
+        "positionSizingCadence": "DIAGNOSTIC_AFTER_DIRECT_NODE_HANDOFF",
     }
 
 
@@ -256,24 +256,27 @@ def run_due_once(
             _run_fifteen_minute_strategy_classifier(core, timestamp)
             _run_five_minute_entry_confirmation(core, timestamp)
             _run_authoritative_entry_risk(core, timestamp)
-            _run_position_sizing_margin(core, timestamp)
+            # Canonical transport is deliberately invoked immediately after
+            # Entry Safety. Python sizing below is diagnostic/support only and
+            # cannot delay or veto the direct Risk-approved Node delivery.
             _run_execution_command_outbox(core, timestamp)
+            _run_position_sizing_margin(core, timestamp)
             with _LOCK:
                 _STATE["lastSetupRunAt"] = timestamp
                 _STATE["lastEntryRunAt"] = timestamp
                 _STATE["lastRiskRunAt"] = timestamp
-                _STATE["lastSizingRunAt"] = timestamp
                 _STATE["lastCommandPublishAt"] = timestamp
+                _STATE["lastSizingRunAt"] = timestamp
                 _STATE["nextSetupRunAt"] = (
                     timestamp + int(cfg["setupIntervalSeconds"])
                 )
                 _STATE["setupRuns"] = int(_STATE.get("setupRuns") or 0) + 1
                 _STATE["entryRuns"] = int(_STATE.get("entryRuns") or 0) + 1
                 _STATE["riskRuns"] = int(_STATE.get("riskRuns") or 0) + 1
-                _STATE["sizingRuns"] = int(_STATE.get("sizingRuns") or 0) + 1
                 _STATE["commandPublishRuns"] = int(
                     _STATE.get("commandPublishRuns") or 0
                 ) + 1
+                _STATE["sizingRuns"] = int(_STATE.get("sizingRuns") or 0) + 1
 
         with _LOCK:
             _STATE["legacySetupWorkerDisabled"] = True
