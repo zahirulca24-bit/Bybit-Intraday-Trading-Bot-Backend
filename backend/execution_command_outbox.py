@@ -1,12 +1,9 @@
 """Direct risk-approved Python-to-Node handoff plus PostgreSQL support mirroring.
 
 The canonical automatic execution transport is an authenticated HTTP delivery of
-Entry-Safety-approved candidates directly to the Node execution service. Python
-quantity/margin calculations are diagnostic only and are never prerequisites for
-that delivery. PostgreSQL execution commands remain best-effort support/history
-for compatibility and reconciliation.
-
-Python never submits a Bybit order from this module.
+Entry-Safety-approved candidates directly to Node. Python sizing and PostgreSQL
+remain non-blocking diagnostic/support systems. Python never submits a Bybit
+order from this module.
 """
 
 from __future__ import annotations
@@ -82,30 +79,28 @@ def snapshot() -> dict[str, Any]:
 
 
 def _risk_snapshot(core: Any) -> dict[str, Any]:
-    reader = getattr(core, "authoritative_entry_risk_status", None)
-    if callable(reader):
-        payload = reader()
-        if isinstance(payload, dict):
-            return dict(payload)
-    reader = getattr(core, "authoritative_entry_risk", None)
-    if callable(reader):
-        payload = reader(False)
-        if isinstance(payload, dict):
-            return dict(payload)
+    for name, args in (
+        ("authoritative_entry_risk_status", ()),
+        ("authoritative_entry_risk", (False,)),
+    ):
+        reader = getattr(core, name, None)
+        if callable(reader):
+            payload = reader(*args)
+            if isinstance(payload, dict):
+                return dict(payload)
     return {}
 
 
 def _sizing_snapshot(core: Any) -> dict[str, Any]:
-    reader = getattr(core, "position_sizing_margin_status", None)
-    if callable(reader):
-        payload = reader()
-        if isinstance(payload, dict):
-            return dict(payload)
-    reader = getattr(core, "position_sizing_margin", None)
-    if callable(reader):
-        payload = reader(False)
-        if isinstance(payload, dict):
-            return dict(payload)
+    for name, args in (
+        ("position_sizing_margin_status", ()),
+        ("position_sizing_margin", (False,)),
+    ):
+        reader = getattr(core, name, None)
+        if callable(reader):
+            payload = reader(*args)
+            if isinstance(payload, dict):
+                return dict(payload)
     return {}
 
 
@@ -114,19 +109,20 @@ def _canonical(value: Mapping[str, Any]) -> str:
 
 
 def _fingerprint(risk: Mapping[str, Any], sizing: Mapping[str, Any]) -> str:
-    risk_base = str(risk.get("inputFingerprint") or "")
     risk_keys = sorted(
         str(row.get("candidateKey") or "")
         for row in risk.get("approvedRiskQueue") or []
         if isinstance(row, dict) and row.get("candidateKey")
     )
-    sizing_base = str(sizing.get("inputFingerprint") or "")
     sizing_keys = sorted(
         str(row.get("candidateKey") or "")
         for row in sizing.get("approvedSizingQueue") or []
         if isinstance(row, dict) and row.get("candidateKey")
     )
-    return f"risk={risk_base}:{'|'.join(risk_keys)};sizing={sizing_base}:{'|'.join(sizing_keys)}"
+    return (
+        f"risk={str(risk.get('inputFingerprint') or '')}:{'|'.join(risk_keys)};"
+        f"sizing={str(sizing.get('inputFingerprint') or '')}:{'|'.join(sizing_keys)}"
+    )
 
 
 def _positive(value: Any) -> bool:
@@ -136,9 +132,14 @@ def _positive(value: Any) -> bool:
         return False
 
 
-def _handoff_payload(candidate: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+def _handoff_payload(
+    candidate: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
     grade = str(candidate.get("grade") or "")
-    if candidate.get("riskApproved") is not True or candidate.get("riskStatus") != "APPROVED_RISK":
+    if (
+        candidate.get("riskApproved") is not True
+        or candidate.get("riskStatus") != "APPROVED_RISK"
+    ):
         return None, "Candidate is not Entry-Safety approved"
     if grade not in {"A+", "A"}:
         return None, "Only A+ and A candidates are executable"
@@ -151,7 +152,7 @@ def _handoff_payload(candidate: Mapping[str, Any]) -> tuple[dict[str, Any] | Non
         return None, "Candidate identity is invalid"
     if not _positive(candidate.get("entryReference")):
         return None, "entryReference must be positive"
-    payload = {
+    return {
         "candidateKey": candidate_key,
         "symbol": symbol,
         "side": side,
@@ -170,8 +171,7 @@ def _handoff_payload(candidate: Mapping[str, Any]) -> tuple[dict[str, Any] | Non
         "executionStatus": "AWAITING_NODE_EXECUTION",
         "orderSubmitted": False,
         "qualified": True,
-    }
-    return payload, None
+    }, None
 
 
 def _handoff_settings() -> tuple[str, str, float]:
@@ -184,8 +184,12 @@ def _handoff_settings() -> tuple[str, str, float]:
     return url, token, max(1.0, min(20.0, timeout))
 
 
-def _post_candidate(payload: Mapping[str, Any], url: str, token: str, timeout: float) -> dict[str, Any]:
-    body = json.dumps(dict(payload), separators=(",", ":"), default=str).encode("utf-8")
+def _post_candidate(
+    payload: Mapping[str, Any], url: str, token: str, timeout: float
+) -> dict[str, Any]:
+    body = json.dumps(
+        dict(payload), separators=(",", ":"), default=str
+    ).encode("utf-8")
     request = urllib.request.Request(
         f"{url}/internal/execution-candidate",
         data=body,
@@ -261,7 +265,9 @@ def _deliver_direct(candidates: list[dict[str, Any]]) -> dict[str, Any]:
 
         if not url or not token:
             retrying += 1
-            last_error = "NODE_EXECUTION_URL or NODE_HANDOFF_TOKEN is not configured"
+            last_error = (
+                "NODE_EXECUTION_URL or NODE_HANDOFF_TOKEN is not configured"
+            )
             rows.append(
                 {
                     "candidateKey": candidate_key,
@@ -277,31 +283,41 @@ def _deliver_direct(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         try:
             result = _post_candidate(payload, url, token, timeout)
         except Exception as exc:
-            result = {"ok": False, "statusCode": 0, "reason": str(exc), "body": {}}
+            result = {
+                "ok": False,
+                "statusCode": 0,
+                "reason": str(exc),
+                "body": {},
+            }
 
         if result.get("ok"):
             _DELIVERED[candidate_key] = canonical
             delivered += 1
-            body = dict(result.get("body") or {})
+            response_body = dict(result.get("body") or {})
             rows.append(
                 {
                     "candidateKey": candidate_key,
                     "symbol": payload["symbol"],
                     "state": "DELIVERED",
-                    "code": str(body.get("code") or "NODE_HANDOFF_DELIVERED"),
-                    "reason": str(body.get("reason") or "Risk-approved candidate delivered to Node"),
-                    "nodeState": body.get("state"),
-                    "duplicate": bool(body.get("duplicate")),
+                    "code": str(
+                        response_body.get("code") or "NODE_HANDOFF_DELIVERED"
+                    ),
+                    "reason": str(
+                        response_body.get("reason")
+                        or "Risk-approved candidate delivered to Node"
+                    ),
+                    "nodeState": response_body.get("state"),
+                    "duplicate": bool(response_body.get("duplicate")),
                     "tradeRejected": False,
                 }
             )
         else:
             retrying += 1
-            body = dict(result.get("body") or {})
+            response_body = dict(result.get("body") or {})
             last_error = str(
                 result.get("reason")
-                or body.get("error")
-                or body.get("reason")
+                or response_body.get("error")
+                or response_body.get("reason")
                 or f"Node handoff HTTP {result.get('statusCode')}"
             )
             rows.append(
@@ -316,8 +332,10 @@ def _deliver_direct(candidates: list[dict[str, Any]]) -> dict[str, Any]:
                 }
             )
 
-    status = "PASS" if candidates and retrying == 0 and invalid == 0 else (
-        "DEGRADED" if retrying or invalid else "WAIT"
+    status = (
+        "PASS"
+        if candidates and retrying == 0 and invalid == 0
+        else ("DEGRADED" if retrying or invalid else "WAIT")
     )
     return {
         "status": status,
@@ -332,12 +350,23 @@ def _deliver_direct(candidates: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _validation_error(candidate: Mapping[str, Any]) -> str | None:
+    """Validate only the backward-compatible PostgreSQL mirror payload.
+
+    This validation does not gate the canonical direct Node delivery. It keeps
+    existing immutable Step-9 support records well-formed while Python sizing
+    remains diagnostic-only for automatic execution.
+    """
     if not candidate.get("candidateKey"):
         return "candidateKey is required"
-    if not candidate.get("sizingApproved"):
+    if candidate.get("sizingApproved") is not True:
         return "Sizing diagnostic output is not ready"
     if candidate.get("positionSizingStatus") != "SIZING_APPROVED":
-        return "positionSizingStatus must be SIZING_APPROVED for PostgreSQL compatibility mirroring"
+        return (
+            "positionSizingStatus must be SIZING_APPROVED for PostgreSQL "
+            "compatibility mirroring"
+        )
+    if str(candidate.get("grade") or "") not in {"A+", "A"}:
+        return "Only A+ and A support payloads may be mirrored"
     if candidate.get("executionStatus") != "AWAITING_NODE_EXECUTION":
         return "executionStatus must be AWAITING_NODE_EXECUTION"
     if candidate.get("orderSubmitted") is not False:
@@ -346,6 +375,38 @@ def _validation_error(candidate: Mapping[str, Any]) -> str | None:
         return "symbol is required"
     if str(candidate.get("side") or "") not in {"Buy", "Sell"}:
         return "side must be Buy or Sell"
+    if candidate.get("marginMode") != "ISOLATED":
+        return "marginMode must be ISOLATED"
+    try:
+        leverage = float(candidate.get("leverage") or 0)
+    except (TypeError, ValueError):
+        leverage = 0
+    if leverage <= 0 or leverage > 10:
+        return "leverage must be positive and no greater than 10x"
+    for field in (
+        "qty",
+        "entryReference",
+        "technicalStopLoss",
+        "takeProfitReference",
+        "requiredInitialMarginUsdt",
+    ):
+        if not _positive(candidate.get(field)):
+            return f"{field} must be positive"
+    requirements = candidate.get("nodeExecutionRequirements")
+    if not isinstance(requirements, dict):
+        return "nodeExecutionRequirements are required"
+    if requirements.get("marginMode") != "ISOLATED":
+        return "Node execution requirement marginMode must be ISOLATED"
+    try:
+        requirement_leverage = float(requirements.get("leverage") or 0)
+    except (TypeError, ValueError):
+        requirement_leverage = 0
+    if requirement_leverage != leverage:
+        return "Node execution requirement leverage must match payload leverage"
+    if requirements.get("revalidateWalletAndInstrumentRules") is not True:
+        return "Node wallet/instrument revalidation requirement is missing"
+    if requirements.get("submitOnlyAfterRevalidation") is not True:
+        return "Node submit-after-revalidation requirement is missing"
     return None
 
 
@@ -359,7 +420,9 @@ def _store(core: Any) -> tuple[Any | None, str | None]:
         "claim_execution_command",
         "transition_execution_command",
     )
-    if store is None or any(not callable(getattr(store, name, None)) for name in required):
+    if store is None or any(
+        not callable(getattr(store, name, None)) for name in required
+    ):
         return None, "PostgreSQL execution-command store is not installed"
     try:
         status = dict(store.status() or {})
@@ -375,7 +438,9 @@ def _store(core: Any) -> tuple[Any | None, str | None]:
     return store, None
 
 
-def _support_wait(candidate: Mapping[str, Any], code: str, reason: str) -> dict[str, Any]:
+def _support_wait(
+    candidate: Mapping[str, Any], code: str, reason: str
+) -> dict[str, Any]:
     return {
         "candidateKey": candidate.get("candidateKey"),
         "symbol": candidate.get("symbol"),
@@ -389,7 +454,9 @@ def _support_wait(candidate: Mapping[str, Any], code: str, reason: str) -> dict[
     }
 
 
-def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int) -> dict[str, Any]:
+def _mirror_postgres(
+    core: Any, candidates: list[dict[str, Any]], timestamp: int
+) -> dict[str, Any]:
     store, store_error = _store(core)
     rows: list[dict[str, Any]] = []
     published = duplicates = waiting = conflicts = 0
@@ -399,7 +466,11 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
             _support_wait(
                 candidate,
                 "OUTBOX_SUPPORT_UNAVAILABLE",
-                store_error or "PostgreSQL support unavailable; direct Node execution eligibility is unchanged",
+                store_error
+                or (
+                    "PostgreSQL support unavailable; direct Node execution "
+                    "eligibility is unchanged"
+                ),
             )
             for candidate in candidates
         ]
@@ -408,7 +479,13 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
         for candidate in candidates:
             validation_error = _validation_error(candidate)
             if validation_error:
-                rows.append(_support_wait(candidate, "EXECUTION_PAYLOAD_NOT_READY", validation_error))
+                rows.append(
+                    _support_wait(
+                        candidate,
+                        "EXECUTION_PAYLOAD_NOT_READY",
+                        validation_error,
+                    )
+                )
                 waiting += 1
                 continue
             candidate_key = str(candidate["candidateKey"])
@@ -436,7 +513,10 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
                     _support_wait(
                         candidate,
                         "OUTBOX_PERSISTENCE_RETRY",
-                        "Published command could not be reloaded; direct execution eligibility is unchanged",
+                        (
+                            "Published command could not be reloaded; direct "
+                            "execution eligibility is unchanged"
+                        ),
                     )
                 )
                 waiting += 1
@@ -446,7 +526,10 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
                     _support_wait(
                         candidate,
                         "IMMUTABLE_PAYLOAD_CONFLICT",
-                        "Candidate key already exists with a different support payload; operator reconciliation required",
+                        (
+                            "Candidate key already exists with a different support "
+                            "payload; operator reconciliation required"
+                        ),
                     )
                 )
                 waiting += 1
@@ -461,11 +544,16 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
                     "slotId": stored.get("slotId"),
                     "ownerId": stored.get("ownerId"),
                     "published": created,
-                    "code": "COMMAND_PUBLISHED" if created else "COMMAND_ALREADY_EXISTS",
+                    "code": (
+                        "COMMAND_PUBLISHED" if created else "COMMAND_ALREADY_EXISTS"
+                    ),
                     "reason": (
                         "Immutable support command persisted as AVAILABLE"
                         if created
-                        else "Existing immutable support command retained without overwrite"
+                        else (
+                            "Existing immutable support command retained without "
+                            "overwrite"
+                        )
                     ),
                     "orderSubmitted": False,
                     "tradeRejected": False,
@@ -477,7 +565,11 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
             else:
                 duplicates += 1
 
-    status = "PASS" if candidates and waiting == 0 else ("WAIT_RETRY" if waiting else "WAIT")
+    status = (
+        "PASS"
+        if candidates and waiting == 0
+        else ("WAIT_RETRY" if waiting else "WAIT")
+    )
     return {
         "status": status,
         "published": published,
@@ -485,8 +577,14 @@ def _mirror_postgres(core: Any, candidates: list[dict[str, Any]], timestamp: int
         "waitingRetry": waiting,
         "immutableConflicts": conflicts,
         "rows": rows,
-        "lastError": store_error if store is None else (
-            "PostgreSQL support writes require retry/reconciliation" if waiting else None
+        "lastError": (
+            store_error
+            if store is None
+            else (
+                "PostgreSQL support writes require retry/reconciliation"
+                if waiting
+                else None
+            )
         ),
         "tradeRejectionAuthority": False,
         "supportOnly": True,
@@ -499,7 +597,7 @@ def build(
     *,
     upstream: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Deliver Risk-approved candidates directly, then mirror support data best-effort."""
+    """Deliver Risk-approved candidates, then mirror support data best-effort."""
     timestamp = int(now or time.time())
     if not _BUILD_LOCK.acquire(blocking=False):
         with _STATE_LOCK:
@@ -522,8 +620,14 @@ def build(
         node_handoff = _deliver_direct(risk_candidates)
         postgres = _mirror_postgres(core, sizing_candidates, timestamp)
         rows = [
-            *[dict(row, channel="DIRECT_NODE") for row in node_handoff["rows"]],
-            *[dict(row, channel="POSTGRES_SUPPORT") for row in postgres["rows"]],
+            *[
+                dict(row, channel="DIRECT_NODE")
+                for row in node_handoff["rows"]
+            ],
+            *[
+                dict(row, channel="POSTGRES_SUPPORT")
+                for row in postgres["rows"]
+            ],
         ]
         fingerprint = _fingerprint(risk, sizing)
         metrics = {
@@ -534,6 +638,12 @@ def build(
             "sizingDiagnosticApprovedInput": len(sizing_candidates),
             "postgresPublished": int(postgres["published"]),
             "postgresWaitingRetry": int(postgres["waitingRetry"]),
+            # Compatibility aliases for existing Step-9 support observers/tests.
+            "published": int(postgres["published"]),
+            "idempotentDuplicates": int(postgres["idempotentDuplicates"]),
+            "waitingRetry": int(postgres["waitingRetry"]),
+            "immutableConflicts": int(postgres["immutableConflicts"]),
+            "blocked": 0,
             "claimOperations": 0,
             "orderSubmissions": 0,
             "maximumNodeSlots": 3,
@@ -544,8 +654,14 @@ def build(
             "tradeRejectionAuthority": False,
         }
         canonical_degraded = node_handoff["status"] == "DEGRADED"
+        support_degraded = int(postgres["waitingRetry"]) > 0
+        aggregate_degraded = canonical_degraded or support_degraded
         payload = {
-            "status": "degraded" if canonical_degraded else ("ready" if rows else "empty"),
+            "status": (
+                "degraded"
+                if aggregate_degraded
+                else ("ready" if rows else "empty")
+            ),
             "version": 3,
             "policyId": POLICY_ID,
             "source": "risk_approved_direct_node_handoff_with_postgresql_support",
@@ -555,7 +671,11 @@ def build(
             "metrics": metrics,
             "nodeHandoff": node_handoff,
             "postgresSupport": postgres,
-            "lastError": node_handoff.get("lastError") if canonical_degraded else None,
+            "lastError": (
+                node_handoff.get("lastError")
+                if canonical_degraded
+                else (postgres.get("lastError") if support_degraded else None)
+            ),
         }
         with _STATE_LOCK:
             _STATE.update(payload)
@@ -566,7 +686,10 @@ def build(
                 {
                     "status": "degraded",
                     "updatedAt": timestamp,
-                    "lastError": f"Direct Node handoff/support publisher unavailable: {exc}",
+                    "lastError": (
+                        "Direct Node handoff/support publisher unavailable: "
+                        f"{exc}"
+                    ),
                 }
             )
             return _snapshot_unlocked()
@@ -575,9 +698,7 @@ def build(
 
 
 def due(core: Any) -> bool:
-    risk = _risk_snapshot(core)
-    sizing = _sizing_snapshot(core)
-    fingerprint = _fingerprint(risk, sizing)
+    fingerprint = _fingerprint(_risk_snapshot(core), _sizing_snapshot(core))
     with _STATE_LOCK:
         node = dict(_STATE.get("nodeHandoff") or {})
         postgres = dict(_STATE.get("postgresSupport") or {})
@@ -591,8 +712,7 @@ def due(core: Any) -> bool:
 def ensure_current(core: Any, now: int | None = None) -> dict[str, Any]:
     if not due(core):
         return snapshot()
-    sizing = _sizing_snapshot(core)
-    return build(core, now=now, upstream=sizing)
+    return build(core, now=now, upstream=_sizing_snapshot(core))
 
 
 def install(core: Any) -> dict[str, Any]:
