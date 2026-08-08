@@ -135,6 +135,32 @@ class ExecutionCommandStorageMixin:
                 row = cur.fetchone()
         return _command_row(row)
 
+    def refresh_stale_execution_command(
+        self,
+        candidate_key: str,
+        payload: dict[str, Any],
+        *,
+        updated_at: int | None = None,
+    ) -> dict[str, Any] | None:
+        key = str(candidate_key or "").strip()
+        if not key:
+            raise ValueError("candidate_key is required")
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError("fresh Step-8 payload is required")
+        timestamp = int(updated_at or time.time())
+        with self.lock, self.connect() as db:
+            with db.cursor() as cur:
+                cur.execute(
+                    "UPDATE execution_commands SET "
+                    "state='AVAILABLE',slot_id=NULL,owner_id=NULL,payload=%s,updated_at=%s "
+                    "WHERE candidate_key=%s AND state='AVAILABLE' "
+                    "RETURNING candidate_key,slot_id,state,payload,owner_id,created_at,updated_at",
+                    (Jsonb(payload), timestamp, key),
+                )
+                updated = cur.fetchone()
+            db.commit()
+        return _command_row(updated)
+
     def list_execution_commands(
         self,
         *,
