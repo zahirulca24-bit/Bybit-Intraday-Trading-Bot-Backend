@@ -1,9 +1,10 @@
-"""Persistent closed-5M entry confirmation for classified 15M setups.
+"""Persistent closed-5M candle confirmation for classified 15M setups.
 
-This stage consumes the latest canonical closed-15M strategy classification and
-reuses the existing strategy engines and deterministic grading thresholds. A
-setup is confirmed only when the same strategy and same side remain actionable
-on a later fully closed 5-minute candle.
+This stage consumes the latest canonical closed-15M strategy classification. An
+A+/A setup is confirmed only when a later fully closed 5-minute candle is
+favorable to the classified side: bullish for Buy, bearish for Sell. The 5M
+stage is confirmation only; it does not re-run strategy voting or re-grade the
+setup.
 
 Step 6 does not run risk checks, calculate position size, or submit an order.
 Confirmed records remain PENDING_RISK for the later authoritative risk, sizing,
@@ -18,10 +19,8 @@ from typing import Any, Callable
 
 try:
     from .scanner_safety import filter_closed_candles
-    from .strategy_step2_upgrade import grade_for_strength
 except ImportError:  # pragma: no cover
     from scanner_safety import filter_closed_candles
-    from strategy_step2_upgrade import grade_for_strength
 
 
 _PERSIST_KEY = "five_minute_entry_confirmation_v1"
@@ -36,7 +35,7 @@ _SETUP_SETTINGS: Callable[[], dict[str, Any]] | None = None
 _STATE: dict[str, Any] = {
     "status": "idle",
     "version": 1,
-    "source": "closed_15m_setup_closed_5m_entry_confirmation",
+    "source": "closed_15m_setup_favorable_closed_5m_confirmation",
     "fiveMinuteCandleTime": None,
     "setupFifteenMinuteCandleTime": None,
     "updatedAt": 0,
@@ -60,7 +59,7 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
         "version": int(_STATE.get("version") or 1),
         "source": str(
             _STATE.get("source")
-            or "closed_15m_setup_closed_5m_entry_confirmation"
+            or "closed_15m_setup_favorable_closed_5m_confirmation"
         ),
         "fiveMinuteCandleTime": _STATE.get("fiveMinuteCandleTime"),
         "setupFifteenMinuteCandleTime": _STATE.get(
@@ -120,7 +119,7 @@ def _load_persisted() -> None:
                 "version": int(saved.get("version") or 1),
                 "source": str(
                     saved.get("source")
-                    or "closed_15m_setup_closed_5m_entry_confirmation"
+                    or "closed_15m_setup_favorable_closed_5m_confirmation"
                 ),
                 "fiveMinuteCandleTime": saved.get("fiveMinuteCandleTime"),
                 "setupFifteenMinuteCandleTime": saved.get(
@@ -205,15 +204,6 @@ def _closed_five_minute_history(
     )
 
 
-def _strategy_vote(
-    votes: list[dict[str, Any]], strategy: str
-) -> dict[str, Any] | None:
-    for raw in votes:
-        if str(raw.get("engine") or "") == strategy:
-            return dict(raw)
-    return None
-
-
 def _queue_candidate(
     queue: list[dict[str, Any]],
     candidate: dict[str, Any],
@@ -254,7 +244,7 @@ def _confirm_symbol(
             "reason": "Classified setup identity is incomplete",
         }, None, "invalidSetupIdentity"
 
-    if not setup.get("gradeExecutionEligible"):
+    if not setup.get("gradeExecutionEligible") or str(setup.get("grade") or "") not in {"A+", "A"}:
         return {
             **base,
             "status": "BLOCKED_GRADE",
@@ -280,93 +270,43 @@ def _confirm_symbol(
         }, None, "stale5mCandle"
 
     try:
-        signal, reason, votes, router, indicators, engine_status = core.evaluate_signal(
-            symbol,
-            _FIVE_MINUTE_INTERVAL,
-            "aggressive",
-        )
-    except Exception as exc:
+        candle_open = float(latest.get("open") or 0)
+        candle_close = float(latest.get("close") or 0)
+    except (TypeError, ValueError):
+        candle_open = 0.0
+        candle_close = 0.0
+    if candle_open <= 0 or candle_close <= 0:
         return {
             **base,
             "status": "ERROR",
-            "reason": f"Strategy engine failed during 5M confirmation: {exc}",
-        }, None, "engineError"
+            "observedFiveMinuteCandleTime": observed_five_minute_ms,
+            "reason": "Closed-5M candle open/close is invalid",
+        }, None, "invalidEntryReference"
 
-    indicators = dict(indicators or {})
-    entry_interval = str(indicators.get("entryInterval") or "")
-    observed_signal_candle = int(indicators.get("signalCandleTime") or 0)
-    if (
-        entry_interval != _FIVE_MINUTE_INTERVAL
-        or observed_signal_candle != target_five_minute_ms
-    ):
-        return {
-            **base,
-            "status": "ERROR",
-            "entryInterval": entry_interval or None,
-            "observedFiveMinuteCandleTime": observed_signal_candle or None,
-            "reason": "Exact closed-5M strategy context is unavailable",
-        }, None, "invalid5mContext"
-
-    raw_votes = [dict(vote) for vote in votes or [] if isinstance(vote, dict)]
-    matching_vote = _strategy_vote(raw_votes, strategy)
+    favorable = (
+        (side == "Buy" and candle_close > candle_open)
+        or (side == "Sell" and candle_close < candle_open)
+    )
     common = {
         **base,
-        "engineSignal": signal,
-        "engineReason": reason,
-        "router": dict(router or {}),
-        "indicators": indicators,
-        "engineStatus": dict(engine_status or {}),
-        "entryInterval": entry_interval,
-        "observedFiveMinuteCandleTime": observed_signal_candle,
-        "strategyVote": matching_vote,
+        "observedFiveMinuteCandleTime": observed_five_minute_ms,
+        "fiveMinuteOpen": round(candle_open, 12),
+        "fiveMinuteClose": round(candle_close, 12),
+        "fiveMinuteDirection": (
+            "BULLISH" if candle_close > candle_open
+            else "BEARISH" if candle_close < candle_open
+            else "FLAT"
+        ),
+        "confirmationRule": "FAVORABLE_CLOSED_5M_CANDLE",
     }
-
-    if matching_vote is None:
-        return {
-            **common,
-            "status": "SETUP_INVALIDATED",
-            "reason": "The classified strategy is unavailable in the 5M evaluation",
-        }, None, "strategyMissing"
-
-    vote_side = str(matching_vote.get("signal") or "")
-    if vote_side == "WAIT":
+    if not favorable:
         return {
             **common,
             "status": "ENTRY_WAIT",
-            "reason": str(
-                matching_vote.get("reason")
-                or "The same strategy has not confirmed the 5M entry"
-            ),
+            "reason": f"Closed 5M candle is not favorable for {side}",
         }, None, None
 
-    if vote_side != side:
-        return {
-            **common,
-            "status": "SETUP_INVALIDATED",
-            "reason": "The same strategy produced an opposing 5M direction",
-        }, None, "opposing5mDirection"
-
-    grading = grade_for_strength(matching_vote.get("strength"))
-    if not grading.get("executionEligible"):
-        return {
-            **common,
-            "status": "BLOCKED_GRADE",
-            "entryGrade": grading.get("grade"),
-            "entryGradeScore": grading.get("gradeScore"),
-            "reason": "The 5M confirmation is below existing A+/A eligibility",
-        }, None, "entryGradeBlocked"
-
-    try:
-        entry_reference = float(latest.get("close") or 0)
-    except (TypeError, ValueError):
-        entry_reference = 0.0
-    if entry_reference <= 0:
-        return {
-            **common,
-            "status": "ERROR",
-            "reason": "Closed-5M entry reference is invalid",
-        }, None, "invalidEntryReference"
-
+    entry_reference = candle_close
     candidate_key = (
         f"{symbol}:{target_setup_ms}:{target_five_minute_ms}:{side}:{strategy}"
     )
@@ -380,12 +320,15 @@ def _confirm_symbol(
         "entryReference": round(entry_reference, 12),
         "entryReferenceSource": "CLOSED_5M_CLOSE",
         "setupStrategyReason": setup.get("strategyReason"),
-        "entryStrategyReason": matching_vote.get("reason"),
-        "strategyStrength": matching_vote.get("strength", 0),
-        "grade": grading.get("grade"),
-        "gradeScore": grading.get("gradeScore"),
+        "entryStrategyReason": f"Favorable closed 5M candle confirmed {side} entry",
+        "strategyStrength": setup.get("strategyStrength", 0),
+        "grade": setup.get("grade"),
+        "gradeScore": setup.get("gradeScore"),
         "setupGrade": setup.get("grade"),
         "setupGradeScore": setup.get("gradeScore"),
+        "fiveMinuteOpen": round(candle_open, 12),
+        "fiveMinuteClose": round(candle_close, 12),
+        "confirmationRule": "FAVORABLE_CLOSED_5M_CANDLE",
         "createdAt": int(now_ms / 1000),
         "riskStatus": "PENDING_RISK",
         "positionSizingStatus": "NOT_EVALUATED_STEP8",
@@ -396,11 +339,11 @@ def _confirm_symbol(
         **common,
         "status": "ENTRY_CONFIRMED",
         "confirmed": True,
-        "entryGrade": grading.get("grade"),
-        "entryGradeScore": grading.get("gradeScore"),
+        "entryGrade": setup.get("grade"),
+        "entryGradeScore": setup.get("gradeScore"),
         "entryReference": candidate["entryReference"],
         "candidateKey": candidate_key,
-        "reason": "Same strategy and side confirmed on the exact closed 5M candle",
+        "reason": "Favorable closed 5M candle confirmed the classified 15M setup",
     }, candidate, None
 
 
@@ -433,7 +376,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             payload = {
                 "status": "waiting",
                 "version": 1,
-                "source": "closed_15m_setup_closed_5m_entry_confirmation",
+                "source": "closed_15m_setup_favorable_closed_5m_confirmation",
                 "fiveMinuteCandleTime": target_five_minute_ms,
                 "setupFifteenMinuteCandleTime": target_setup_ms,
                 "updatedAt": timestamp,
@@ -473,12 +416,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             "setupGradeBlocked": 0,
             "missing5mHistory": 0,
             "stale5mCandle": 0,
-            "invalid5mContext": 0,
-            "strategyMissing": 0,
-            "opposing5mDirection": 0,
-            "entryGradeBlocked": 0,
             "invalidEntryReference": 0,
-            "engineError": 0,
         }
 
         for setup in setup_rows:
@@ -521,13 +459,15 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             "riskChecks": 0,
             "positionSizingCalls": 0,
             "orderSubmissions": 0,
-            "confirmationPolicy": "SAME_STRATEGY_SAME_SIDE_CLOSED_5M",
+            "confirmationPolicy": "FAVORABLE_CLOSED_5M_CANDLE_ONLY",
+            "strategyRevoteAt5m": False,
+            "regradeAt5m": False,
             "rejected": rejected,
         }
         payload = {
             "status": "ready",
             "version": 1,
-            "source": "closed_15m_setup_closed_5m_entry_confirmation",
+            "source": "closed_15m_setup_favorable_closed_5m_confirmation",
             "fiveMinuteCandleTime": target_five_minute_ms,
             "setupFifteenMinuteCandleTime": target_setup_ms,
             "updatedAt": timestamp,
@@ -592,7 +532,9 @@ def status(core: Any | None = None) -> dict[str, Any]:
             core is not None
             and getattr(core, "_five_minute_entry_confirmation_v1_installed", False)
         ),
-        "policy": "CLOSED_15M_SETUP_THEN_SAME_STRATEGY_CLOSED_5M_CONFIRMATION",
+        "policy": "CLOSED_15M_SETUP_THEN_FAVORABLE_CLOSED_5M_CANDLE",
+        "strategyRevoteAt5m": False,
+        "regradeAt5m": False,
         "riskChecks": False,
         "positionSizing": False,
         "submitsOrder": False,
@@ -608,7 +550,7 @@ def _reset_for_tests() -> None:
             {
                 "status": "idle",
                 "version": 1,
-                "source": "closed_15m_setup_closed_5m_entry_confirmation",
+                "source": "closed_15m_setup_favorable_closed_5m_confirmation",
                 "fiveMinuteCandleTime": None,
                 "setupFifteenMinuteCandleTime": None,
                 "updatedAt": 0,

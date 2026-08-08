@@ -28,12 +28,11 @@ class SetupWorkerStub:
 
 
 class CoreStub:
-    def __init__(self, *, vote_signal="Buy", vote_strength=4.8):
+    def __init__(self, *, candle_side="bullish"):
         self._durable_state_store = MemoryStore()
-        self.vote_signal = vote_signal
-        self.vote_strength = vote_strength
-        self.evaluate_calls = []
+        self.candle_side = candle_side
         self.fetch_calls = []
+        self.evaluate_calls = []
         self.classification = classification_payload()
 
     def fifteen_minute_strategy_classification_status(self):
@@ -47,13 +46,20 @@ class CoreStub:
         for index in range(60):
             candle_time = target - ((59 - index) * 300_000)
             price = 100 + index * 0.01
+            candle_open = price - 0.02
+            candle_close = price
+            if index == 59:
+                if self.candle_side == "bearish":
+                    candle_open, candle_close = price + 0.02, price
+                elif self.candle_side == "flat":
+                    candle_open = candle_close = price
             rows.append(
                 {
                     "time": candle_time,
-                    "open": price - 0.02,
-                    "high": price + 0.05,
-                    "low": price - 0.05,
-                    "close": price,
+                    "open": candle_open,
+                    "high": max(candle_open, candle_close) + 0.05,
+                    "low": min(candle_open, candle_close) - 0.05,
+                    "close": candle_close,
                     "volume": 1000 + index,
                 }
             )
@@ -61,30 +67,7 @@ class CoreStub:
 
     def evaluate_signal(self, symbol, interval, mode):
         self.evaluate_calls.append((symbol, interval, mode))
-        return (
-            self.vote_signal if self.vote_signal in {"Buy", "Sell"} else "WAIT",
-            "existing strategy evaluation",
-            [
-                {
-                    "engine": "Trend Follow",
-                    "signal": self.vote_signal,
-                    "strength": self.vote_strength,
-                    "reason": "existing 5M trigger result",
-                },
-                {
-                    "engine": "S/R Breakout",
-                    "signal": "WAIT",
-                    "strength": 0,
-                    "reason": "waiting",
-                },
-            ],
-            {"decision": self.vote_signal, "mode": mode},
-            {
-                "entryInterval": "5",
-                "signalCandleTime": 3_600_000,
-            },
-            {"strategy": "ok"},
-        )
+        raise AssertionError("5M confirmation must not re-run strategy evaluation")
 
 
 def classification_payload():
@@ -118,8 +101,8 @@ def install(core):
     confirmation.install(core, SetupWorkerStub())
 
 
-def test_same_strategy_and_side_confirm_exact_closed_5m_entry():
-    core = CoreStub()
+def test_favorable_bullish_closed_5m_confirms_buy_without_strategy_revote():
+    core = CoreStub(candle_side="bullish")
     install(core)
 
     result = confirmation.build(core, now=3900)
@@ -129,6 +112,9 @@ def test_same_strategy_and_side_confirm_exact_closed_5m_entry():
     assert result["setupFifteenMinuteCandleTime"] == 2_700_000
     assert result["metrics"]["confirmed"] == 1
     assert result["metrics"]["queuedNow"] == 1
+    assert result["metrics"]["confirmationPolicy"] == "FAVORABLE_CLOSED_5M_CANDLE_ONLY"
+    assert result["metrics"]["strategyRevoteAt5m"] is False
+    assert result["metrics"]["regradeAt5m"] is False
     assert result["riskChecks"] == 0
     assert result["positionSizingCalls"] == 0
     assert result["orderSubmissions"] == 0
@@ -138,45 +124,69 @@ def test_same_strategy_and_side_confirm_exact_closed_5m_entry():
     assert candidate["symbol"] == "BTCUSDT"
     assert candidate["side"] == "Buy"
     assert candidate["strategy"] == "Trend Follow"
+    assert candidate["grade"] == "A+"
+    assert candidate["gradeScore"] == 96.0
+    assert candidate["confirmationRule"] == "FAVORABLE_CLOSED_5M_CANDLE"
     assert candidate["entryFiveMinuteCandleTime"] == 3_600_000
     assert candidate["riskStatus"] == "PENDING_RISK"
     assert candidate["positionSizingStatus"] == "NOT_EVALUATED_STEP8"
     assert candidate["executionStatus"] == "AWAITING_NODE_EXECUTION"
     assert candidate["orderSubmitted"] is False
-    assert core.evaluate_calls == [("BTCUSDT", "5", "aggressive")]
+    assert core.evaluate_calls == []
 
 
-def test_waiting_same_strategy_does_not_create_candidate():
-    core = CoreStub(vote_signal="WAIT", vote_strength=0)
+def test_bearish_closed_5m_waits_for_buy_setup():
+    core = CoreStub(candle_side="bearish")
     install(core)
 
     result = confirmation.build(core, now=3900)
 
     assert result["rows"][0]["status"] == "ENTRY_WAIT"
+    assert result["rows"][0]["fiveMinuteDirection"] == "BEARISH"
     assert result["confirmedEntryQueueSize"] == 0
     assert result["metrics"]["confirmed"] == 0
+    assert core.evaluate_calls == []
 
 
-def test_opposing_same_strategy_invalidates_setup():
-    core = CoreStub(vote_signal="Sell", vote_strength=4.8)
+def test_flat_closed_5m_waits_for_buy_setup():
+    core = CoreStub(candle_side="flat")
     install(core)
 
     result = confirmation.build(core, now=3900)
 
-    assert result["rows"][0]["status"] == "SETUP_INVALIDATED"
-    assert result["metrics"]["invalidated"] == 1
+    assert result["rows"][0]["status"] == "ENTRY_WAIT"
+    assert result["rows"][0]["fiveMinuteDirection"] == "FLAT"
     assert result["confirmedEntryQueueSize"] == 0
+    assert core.evaluate_calls == []
 
 
-def test_existing_grade_threshold_blocks_b_plus_entry():
-    core = CoreStub(vote_signal="Buy", vote_strength=3.3)
+def test_favorable_bearish_closed_5m_confirms_sell_without_strategy_revote():
+    core = CoreStub(candle_side="bearish")
+    core.classification["rows"][0]["expectedSide"] = "Sell"
+    install(core)
+
+    result = confirmation.build(core, now=3900)
+
+    assert result["rows"][0]["status"] == "ENTRY_CONFIRMED"
+    assert result["rows"][0]["fiveMinuteDirection"] == "BEARISH"
+    assert result["confirmedEntryQueueSize"] == 1
+    assert result["confirmedEntryQueue"][0]["side"] == "Sell"
+    assert core.evaluate_calls == []
+
+
+def test_15m_b_plus_remains_blocked_before_5m_confirmation():
+    core = CoreStub(candle_side="bullish")
+    row = core.classification["rows"][0]
+    row["grade"] = "B+"
+    row["gradeScore"] = 84.0
+    row["gradeExecutionEligible"] = False
     install(core)
 
     result = confirmation.build(core, now=3900)
 
     assert result["rows"][0]["status"] == "BLOCKED_GRADE"
-    assert result["rows"][0]["entryGrade"] == "B+"
     assert result["confirmedEntryQueueSize"] == 0
+    assert core.evaluate_calls == []
 
 
 def test_stale_15m_classification_fails_closed():
@@ -188,6 +198,7 @@ def test_stale_15m_classification_fails_closed():
 
     assert result["status"] == "error"
     assert "stale" in result["lastError"].lower()
+    assert core.fetch_calls == []
     assert core.evaluate_calls == []
 
 
@@ -204,6 +215,7 @@ def test_new_15m_setup_waits_for_later_closed_5m_candle():
     assert result["status"] == "waiting"
     assert result["metrics"]["confirmed"] == 0
     assert "Awaiting the first closed 5M" in result["metrics"]["reason"]
+    assert core.fetch_calls == []
     assert core.evaluate_calls == []
 
 
@@ -216,7 +228,8 @@ def test_same_closed_5m_candle_is_not_processed_twice():
 
     assert first["confirmedEntryQueueSize"] == 1
     assert second["confirmedEntryQueueSize"] == 1
-    assert core.evaluate_calls == [("BTCUSDT", "5", "aggressive")]
+    assert len(core.fetch_calls) == 1
+    assert core.evaluate_calls == []
 
 
 def test_confirmation_snapshot_is_persisted_and_reloaded():
