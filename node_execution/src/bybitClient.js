@@ -90,6 +90,14 @@ export class BybitClient {
   wallet() { return this.request('GET', '/v5/account/wallet-balance', { accountType: 'UNIFIED', coin: 'USDT' }); }
   instrument(symbol) { return this.publicRequest('/v5/market/instruments-info', { category: 'linear', symbol }); }
   ticker(symbol) { return this.publicRequest('/v5/market/tickers', { category: 'linear', symbol }); }
+  klines(symbol, interval = '15', limit = 80) {
+    return this.publicRequest('/v5/market/kline', {
+      category: 'linear',
+      symbol,
+      interval,
+      limit,
+    });
+  }
   position(symbol) { return this.request('GET', '/v5/position/list', { category: 'linear', symbol }); }
   positions() { return this.request('GET', '/v5/position/list', { category: 'linear', settleCoin: 'USDT', limit: 200 }); }
   activeOrders(symbol) {
