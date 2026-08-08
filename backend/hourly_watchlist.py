@@ -207,6 +207,7 @@ def _eligible_market(core: Any) -> tuple[list[str], dict[str, dict[str, Any]], d
         try:
             last = float(item.get("lastPrice") or 0)
             turnover = float(item.get("turnover24h") or 0)
+            price_24h_pct = float(item.get("price24hPcnt") or 0) * 100
         except (TypeError, ValueError):
             rejected["invalidPrice"] += 1
             continue
@@ -225,6 +226,7 @@ def _eligible_market(core: Any) -> tuple[list[str], dict[str, dict[str, Any]], d
             "lastPrice": last,
             "turnover24h": turnover,
             "spreadPct": round(spread, 5),
+            "change24hPct": round(price_24h_pct, 5),
         }
     return sorted(set(symbols)), market, rejected
 
@@ -287,6 +289,7 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
                     "turnover24h": float(ticker["turnover24h"]),
                     "spreadPct": float(ticker["spreadPct"]),
                     "lastPrice": float(ticker["lastPrice"]),
+                    "change24hPct": float(ticker["change24hPct"]),
                     "reason": str(reason),
                     "lastScannedAt": timestamp,
                     "selectedAt": timestamp,
