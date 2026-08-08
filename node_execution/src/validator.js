@@ -12,13 +12,44 @@ function approvedLeverage(payload) {
   return leverage;
 }
 
-export function validateContract(payload, candidateKey = payload?.candidateKey) {
-  if (!payload || payload.positionSizingStatus !== 'SIZING_APPROVED' || payload.sizingApproved !== true) {
-    throw new Error('Command is not Step-8 sizing approved');
+function directRiskApproved(payload) {
+  return payload?.riskApproved === true && String(payload?.riskStatus || '') === 'APPROVED_RISK';
+}
+
+function legacySizingApproved(payload) {
+  return payload?.positionSizingStatus === 'SIZING_APPROVED' && payload?.sizingApproved === true;
+}
+
+export function validateCandidateFacts(payload, candidateKey = payload?.candidateKey) {
+  if (!payload || typeof payload !== 'object') throw new Error('Candidate payload is required');
+  if (!payload.candidateKey || payload.candidateKey !== candidateKey || !payload.symbol || !['Buy', 'Sell'].includes(payload.side)) {
+    throw new Error('Candidate identity is invalid');
+  }
+  const grade = String(payload.grade || payload.qualityGrade || payload.signalGrade || '');
+  if (grade && !['A+', 'A'].includes(grade)) throw new Error('Node execution requires A+ or A grade');
+  if (!directRiskApproved(payload) && !legacySizingApproved(payload)) {
+    throw new Error('Candidate is neither Entry-Safety approved nor legacy sizing approved');
   }
   if (payload.executionStatus !== 'AWAITING_NODE_EXECUTION' || payload.orderSubmitted !== false) {
     throw new Error('Command execution state is invalid');
   }
+  positiveNumber(payload.entryReference, 'entryReference');
+  if (directRiskApproved(payload)) {
+    const riskPct = Number(payload.riskPerTradePct ?? payload.effectiveRiskPerTradePct ?? payload.gradeRiskPct);
+    if (!Number.isFinite(riskPct) || riskPct <= 0 || riskPct > 1.0 + 1e-9) {
+      throw new Error('Entry-Safety candidate planned risk must be positive and no greater than 1.00%');
+    }
+  }
+  return payload;
+}
+
+export function validateContract(payload, candidateKey = payload?.candidateKey) {
+  validateCandidateFacts(payload, candidateKey);
+
+  // Direct candidates deliberately arrive before executable sizing. They are
+  // sized from current Bybit truth by liveSizer immediately before submission.
+  if (!legacySizingApproved(payload)) return payload;
+
   if (payload.marginMode !== 'ISOLATED') {
     throw new Error('Only Isolated margin is approved');
   }
@@ -36,11 +67,7 @@ export function validateContract(payload, candidateKey = payload?.candidateKey) 
   ) {
     throw new Error('Node execution revalidation contract is incomplete');
   }
-  if (!payload.candidateKey || payload.candidateKey !== candidateKey || !payload.symbol || !['Buy', 'Sell'].includes(payload.side)) {
-    throw new Error('Candidate identity is invalid');
-  }
   positiveNumber(payload.qty, 'qty');
-  positiveNumber(payload.entryReference, 'entryReference');
   positiveNumber(payload.technicalStopLoss, 'technicalStopLoss');
   positiveNumber(payload.takeProfitReference, 'takeProfitReference');
   positiveNumber(payload.requiredInitialMarginUsdt, 'requiredInitialMarginUsdt');
@@ -55,6 +82,9 @@ export function validateContract(payload, candidateKey = payload?.candidateKey) 
 
 export function revalidateLive(payload, truth, config, nowSeconds = Math.floor(Date.now() / 1000)) {
   validateContract(payload);
+  if (!legacySizingApproved(payload)) {
+    throw new Error('Direct candidate requires Node live sizing before legacy revalidation');
+  }
   const wallet = list(truth.wallet)[0];
   const instrument = list(truth.instrument)[0];
   const ticker = list(truth.ticker)[0];
