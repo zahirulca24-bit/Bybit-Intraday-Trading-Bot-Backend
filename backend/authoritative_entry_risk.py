@@ -1,13 +1,14 @@
-"""Persistent authoritative risk decisions for confirmed closed-5M entries.
+"""Persistent Entry Safety decisions for confirmed closed-5M entries.
 
-This stage is deliberately compositional: it does not introduce a new risk
-formula. It consumes Step-6 confirmed candidates and reuses the live runtime's
-existing authoritative daily-risk report, protected position guard, agreement
-contract guard, signal-risk policy, and cooldown rule.
+This stage consumes Step-6 confirmed candidates and answers only whether an
+already strategy-qualified trade is safe to open right now. It reuses the live
+runtime's authoritative daily-risk report, protected position guard, agreement
+contract guard, freshness limit, and cooldown rule.
 
-Step 7 never calculates quantity and never submits an order. Approved records
-remain ready for the separate Step-8 position-sizing stage and later Node.js
-execution authority.
+Entry Safety does not re-evaluate strategy vote count/strength or losing-streak
+sizing. Step 7 never calculates quantity and never submits an order. Approved
+records always leave this stage with ``riskSizeFactor == 1.0`` for the separate
+Step-8 fixed-risk position-sizing stage and later Node.js execution authority.
 """
 
 from __future__ import annotations
@@ -18,11 +19,9 @@ from typing import Any, Mapping
 
 try:
     from . import agreement_execution_guard, execution_handoff
-    from .engines.risk import signal_risk_policy
 except ImportError:  # pragma: no cover - direct script compatibility
     import agreement_execution_guard
     import execution_handoff
-    from engines.risk import signal_risk_policy
 
 
 POLICY_ID = "AUTHORITATIVE_ENTRY_RISK_V1"
@@ -250,17 +249,26 @@ def _evaluate_candidate(
     grade = str(item.get("grade") or "")
     checks: dict[str, Any] = {}
 
+    confirmed_contract_ok = bool(
+        item.get("riskStatus") == "PENDING_RISK"
+        and item.get("positionSizingStatus") == "NOT_EVALUATED_STEP8"
+    )
+    checks["confirmedEntry"] = {
+        "ok": confirmed_contract_ok,
+        "source": "five_minute_entry_confirmation.confirmedEntryQueue",
+    }
     if (
         not candidate_key
         or not symbol
         or side not in {"Buy", "Sell"}
         or grade not in {"A+", "A"}
+        or not confirmed_contract_ok
         or item.get("orderSubmitted") is not False
     ):
         return _blocked(
             item,
             code="INVALID_CONFIRMED_ENTRY",
-            reason="Confirmed-entry identity, grade, or order state is invalid",
+            reason="Confirmed-entry identity, grade, stage, or order state is invalid",
             checks=checks,
             timestamp=timestamp,
         )
@@ -359,25 +367,6 @@ def _evaluate_candidate(
             timestamp=timestamp,
         )
 
-    risk_state = {
-        **dict(state),
-        **item,
-        "symbol": symbol,
-        "signal": side,
-        "side": side,
-        "strategyStrength": item.get("strategyStrength"),
-    }
-    signal_policy = dict(signal_risk_policy(risk_state, side) or {})
-    checks["signalRisk"] = signal_policy
-    if not signal_policy.get("ok"):
-        return _blocked(
-            item,
-            code="SIGNAL_RISK_BLOCKED",
-            reason=str(signal_policy.get("reason") or "Signal risk blocked"),
-            checks=checks,
-            timestamp=timestamp,
-        )
-
     cooldown_seconds = max(0, int(_number(state.get("cooldownSeconds"), 0)))
     last_trade_at = _number(state.get("lastTradeAt"), 0.0)
     elapsed = timestamp - last_trade_at if last_trade_at > 0 else None
@@ -404,12 +393,12 @@ def _evaluate_candidate(
         "riskPolicyId": POLICY_ID,
         "riskDecisionAt": timestamp,
         "riskApproved": True,
-        "riskSizeFactor": signal_policy.get("sizeFactor", 1.0),
-        "riskFlags": list(signal_policy.get("riskFlags") or []),
+        "riskSizeFactor": 1.0,
+        "riskFlags": [],
         "riskDecision": {
             "ok": True,
             "code": "RISK_APPROVED",
-            "reason": "Existing authoritative risk authorities approved candidate",
+            "reason": "Entry Safety checks approved candidate",
             "checks": checks,
         },
         "positionSizingStatus": "NOT_EVALUATED_STEP8",
@@ -464,11 +453,7 @@ def build(
                 for row in rows
                 if "positionGuard" in (row.get("riskDecision") or {}).get("checks", {})
             ),
-            "signalRiskChecks": sum(
-                1
-                for row in rows
-                if "signalRisk" in (row.get("riskDecision") or {}).get("checks", {})
-            ),
+            "signalRiskChecks": 0,
             "agreementChecks": sum(
                 1
                 for row in rows
@@ -476,7 +461,7 @@ def build(
             ),
             "positionSizingCalls": 0,
             "orderSubmissions": 0,
-            "policy": "REUSE_EXISTING_AUTHORITATIVE_RISK_AUTHORITIES",
+            "policy": "ENTRY_SAFETY_ONLY",
         }
         fingerprint = _fingerprint(source)
         payload = {
@@ -551,9 +536,10 @@ def status(core: Any | None = None) -> dict[str, Any]:
             and getattr(core, "_authoritative_entry_risk_v1_installed", False)
         ),
         "policyId": POLICY_ID,
+        "entrySafetyOnly": True,
         "reusesDailyRisk": True,
         "reusesPositionGuard": True,
-        "reusesSignalRisk": True,
+        "reusesSignalRisk": False,
         "reusesCooldown": True,
         "reusesAgreementGuard": True,
         "calculatesPositionSize": False,
