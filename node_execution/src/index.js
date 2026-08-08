@@ -109,21 +109,29 @@ async function coordinator() {
         continue;
       }
 
-      runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config });
+      const adopted = await repository.adoptActiveCommands(config.ownerId);
+      if (adopted.length > config.maxActiveTrades) throw new Error(`Execution permits at most ${config.maxActiveTrades} active commands.`);
+
+      runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config, adoptedCommands: adopted });
       if (!runtime.firstTradeGate.ok) {
         runtime.ready = false;
-        runtime.lastError = `Execution preflight blocked: ${runtime.firstTradeGate.reasons.join(' ')}`;
+        runtime.lastError = `Execution recovery/preflight blocked: ${runtime.firstTradeGate.reasons.join(' ')}`;
         await repository.releaseLeadership().catch(() => undefined);
         await sleep(config.pollMs);
         continue;
       }
 
-      const adopted = await repository.adoptActiveCommands(config.ownerId);
-      if (adopted.length > config.maxActiveTrades) throw new Error(`Execution permits at most ${config.maxActiveTrades} active commands.`);
       runtime.ready = true;
       runtime.lastError = null;
       workersStarted = true;
-      console.log(JSON.stringify({ level: 'info', event: 'controlled_demo_execution_ready', ownerId: config.ownerId, gradeRiskPct: config.gradeRiskPct, maxActiveTrades: config.maxActiveTrades }));
+      console.log(JSON.stringify({
+        level: 'info',
+        event: 'controlled_demo_execution_ready',
+        ownerId: config.ownerId,
+        gradeRiskPct: config.gradeRiskPct,
+        maxActiveTrades: config.maxActiveTrades,
+        recoveredActiveCommands: adopted.length,
+      }));
       await Promise.all([1, 2, 3].map((slotId) => slotLoop(slotId)));
 
       workersStarted = false;
