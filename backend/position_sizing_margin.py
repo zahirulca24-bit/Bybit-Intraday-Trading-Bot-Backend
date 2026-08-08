@@ -268,8 +268,8 @@ def _wallet_snapshot(core: Any) -> dict[str, Any]:
     equity = _number(account.get("totalEquity"), 0.0)
     available = _number(account.get("totalAvailableBalance"), -1.0)
     initial = _number(account.get("totalInitialMargin"), -1.0)
-    if equity <= 0 or available < 0:
-        return {"ok": False, "reason": "Wallet equity or total available balance is unavailable"}
+    if equity <= 0:
+        return {"ok": False, "reason": "Wallet equity is unavailable"}
     if initial < 0:
         positions_reader = getattr(core, "get_open_positions", None)
         if not callable(positions_reader):
@@ -285,12 +285,25 @@ def _wallet_snapshot(core: Any) -> dict[str, Any]:
             if position_im < 0:
                 return {"ok": False, "reason": "An open position has no authoritative initial-margin value"}
             initial += position_im
+    current_initial = max(0.0, initial)
+    available_source = "BYBIT_TOTAL_AVAILABLE_BALANCE"
+    fallback_applied = False
+    if available < 0:
+        # Bybit Demo Unified wallet can leave totalAvailableBalance blank while
+        # the account is funded. Use a conservative live-equity remainder.
+        available = max(0.0, equity - current_initial)
+        available_source = "EQUITY_MINUS_CURRENT_INITIAL_MARGIN"
+        fallback_applied = True
+    if available < 0:
+        return {"ok": False, "reason": "Wallet available balance is unavailable"}
     return {
         "ok": True,
         "source": "BYBIT_UNIFIED_WALLET",
         "equity": equity,
         "availableMargin": available,
-        "currentInitialMargin": max(0.0, initial),
+        "availableMarginSource": available_source,
+        "availableMarginFallbackApplied": fallback_applied,
+        "currentInitialMargin": current_initial,
     }
 
 
@@ -474,6 +487,8 @@ def _evaluate_candidate(
         "riskMultipliedByLeverage": False,
         "equity": equity,
         "availableMargin": available,
+        "availableMarginSource": wallet.get("availableMarginSource"),
+        "availableMarginFallbackApplied": bool(wallet.get("availableMarginFallbackApplied")),
         "currentInitialMargin": current_initial,
         "reservedMarginThisCycle": reserved_margin,
         "remainingAvailableMarginUsdt": remaining_available,
