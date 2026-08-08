@@ -1,9 +1,9 @@
-"""Persistent closed-1H Top-20 watchlist from directly eligible USDT contracts.
+"""Persistent closed-1H Top-50 watchlist from directly eligible USDT contracts.
 
 This module is the canonical scan entry point for the strategy pipeline. Eligible
 Bybit USDT linear contracts are filtered by price, turnover and spread, then
 classified from the latest fully closed 1H candle set using the existing worker
-trend classifier and ranking formula. The resulting Top-20 feeds the existing
+trend classifier and ranking formula. The resulting Top-50 feeds the existing
 closed-15M setup stage.
 """
 
@@ -20,7 +20,8 @@ except ImportError:  # pragma: no cover
     from scanner_safety import filter_closed_candles
 
 
-_PERSIST_KEY = "hourly_watchlist_top20_v2"
+_PERSIST_KEY = "hourly_watchlist_top50_v3"
+_LEGACY_PERSIST_KEYS = ("hourly_watchlist_top20_v2",)
 _INTERVAL = "60"
 _INTERVAL_SECONDS = 60 * 60
 _STATE_LOCK = threading.RLock()
@@ -31,8 +32,8 @@ _STORE: Any | None = None
 
 _STATE: dict[str, Any] = {
     "status": "idle",
-    "version": 2,
-    "source": "eligible_usdt_closed_1h_top20",
+    "version": 3,
+    "source": "eligible_usdt_closed_1h_top50",
     "oneHourCandleTime": None,
     "updatedAt": 0,
     "symbols": [],
@@ -61,7 +62,7 @@ def _number(name: str, default: float, minimum: float, maximum: float) -> float:
 
 def settings() -> dict[str, int | float]:
     return {
-        "watchlistSize": _integer("HOURLY_WATCHLIST_SIZE", 20, 1, 50),
+        "watchlistSize": _integer("HOURLY_WATCHLIST_SIZE", 50, 1, 100),
         "minimumClosedCandles": _integer(
             "HOURLY_WATCHLIST_MIN_CLOSED_CANDLES", 60, 60, 240
         ),
@@ -82,8 +83,8 @@ def _snapshot_unlocked(status_override: str | None = None) -> dict[str, Any]:
     rows = [dict(row) for row in _STATE.get("rows") or []]
     return {
         "status": status_override or str(_STATE.get("status") or "idle"),
-        "version": int(_STATE.get("version") or 2),
-        "source": str(_STATE.get("source") or "eligible_usdt_closed_1h_top20"),
+        "version": int(_STATE.get("version") or 3),
+        "source": str(_STATE.get("source") or "eligible_usdt_closed_1h_top50"),
         "oneHourCandleTime": _STATE.get("oneHourCandleTime"),
         "updatedAt": int(_STATE.get("updatedAt") or 0),
         "activeSymbols": list(_STATE.get("symbols") or []),
@@ -119,34 +120,51 @@ def _persistent_store(core: Any) -> Any | None:
     return store
 
 
-def _load_persisted() -> None:
+def _read_saved_watchlist() -> tuple[dict[str, Any] | None, str | None]:
     if _STORE is None:
-        return
-    try:
-        saved = _STORE.get(_PERSIST_KEY)
-    except Exception:
-        return
+        return None, None
+    for key in (_PERSIST_KEY, *_LEGACY_PERSIST_KEYS):
+        try:
+            saved = _STORE.get(key)
+        except Exception:
+            continue
+        if isinstance(saved, dict):
+            return saved, key
+    return None, None
+
+
+def _load_persisted() -> None:
+    saved, key = _read_saved_watchlist()
     if not isinstance(saved, dict):
         return
     raw_symbols = saved.get("symbols")
     raw_rows = saved.get("rows")
     if not isinstance(raw_symbols, list) or not isinstance(raw_rows, list):
         return
-    rows = [dict(row) for row in raw_rows if isinstance(row, dict)]
-    symbols = [str(value or "").upper() for value in raw_symbols if str(value or "").strip()]
+    maximum = int(settings()["watchlistSize"])
+    rows = [dict(row) for row in raw_rows if isinstance(row, dict)][:maximum]
+    symbols = [
+        str(value or "").upper()
+        for value in raw_symbols
+        if str(value or "").strip()
+    ][:maximum]
     if bool(rows) != bool(symbols):
         return
+    metrics = dict(saved.get("metrics") or {})
+    if key in _LEGACY_PERSIST_KEYS:
+        metrics["migratedFrom"] = key
+        metrics["legacyPersistedRowsLoaded"] = len(rows)
     with _STATE_LOCK:
         _STATE.update(
             {
                 "status": str(saved.get("status") or ("ready" if symbols else "empty")),
-                "version": int(saved.get("version") or 2),
-                "source": str(saved.get("source") or "eligible_usdt_closed_1h_top20"),
+                "version": 3,
+                "source": "eligible_usdt_closed_1h_top50",
                 "oneHourCandleTime": saved.get("oneHourCandleTime"),
                 "updatedAt": int(saved.get("updatedAt") or 0),
                 "symbols": symbols,
                 "rows": rows,
-                "metrics": dict(saved.get("metrics") or {}),
+                "metrics": metrics,
                 "lastError": saved.get("lastError"),
                 "persisted": True,
             }
@@ -302,17 +320,18 @@ def build(core: Any, now: int | None = None) -> dict[str, Any]:
             "eligibleMarketInput": len(symbols),
             "oneHourQualified": len(qualified),
             "selected": len(selected),
+            "watchlistLimit": int(cfg["watchlistSize"]),
             "bullish": sum(1 for row in selected if row.get("trend") == "BULLISH"),
             "bearish": sum(1 for row in selected if row.get("trend") == "BEARISH"),
             "upstreamTimeframes": ["1H"],
-            "rankingPolicy": "existing_worker_rank_rows",
+            "rankingPolicy": "existing_worker_rank_rows_top50",
             "marketRejected": market_rejected,
             "rejected": rejected,
         }
         payload = {
             "status": "ready" if selected else "empty",
-            "version": 2,
-            "source": "eligible_usdt_closed_1h_top20",
+            "version": 3,
+            "source": "eligible_usdt_closed_1h_top50",
             "oneHourCandleTime": target_open_ms,
             "updatedAt": timestamp,
             "symbols": [str(row["symbol"]) for row in selected],
@@ -351,7 +370,7 @@ def run_batch(core: Any, now: int | None = None) -> dict[str, Any]:
 
 def install(core: Any, worker_module: Any) -> dict[str, Any]:
     global _TREND_CLASSIFIER, _RANK_ROWS, _STORE
-    if getattr(worker_module, "_hourly_watchlist_v2_installed", False):
+    if getattr(worker_module, "_hourly_watchlist_v3_installed", False):
         return status(worker_module)
 
     classifier = getattr(worker_module, "classify_trend", None)
@@ -368,6 +387,7 @@ def install(core: Any, worker_module: Any) -> dict[str, Any]:
     worker_module._hourly_watchlist_base_snapshot = worker_module.snapshot
     worker_module.run_batch = run_batch
     worker_module.snapshot = snapshot
+    worker_module._hourly_watchlist_v3_installed = True
     worker_module._hourly_watchlist_v2_installed = True
 
     core.hourly_watchlist = lambda force=False: build(core) if force else ensure_current(core)
@@ -376,10 +396,16 @@ def install(core: Any, worker_module: Any) -> dict[str, Any]:
 
 
 def status(worker_module: Any | None = None) -> dict[str, Any]:
-    installed = bool(worker_module is not None and getattr(worker_module, "_hourly_watchlist_v2_installed", False))
+    installed = bool(
+        worker_module is not None
+        and (
+            getattr(worker_module, "_hourly_watchlist_v3_installed", False)
+            or getattr(worker_module, "_hourly_watchlist_v2_installed", False)
+        )
+    )
     return {
         "installed": installed,
-        "policy": "ELIGIBLE_USDT_TO_CLOSED_1H_TOP20",
+        "policy": "ELIGIBLE_USDT_TO_CLOSED_1H_TOP50",
         "snapshot": snapshot(),
     }
 
@@ -390,8 +416,8 @@ def _reset_for_tests() -> None:
         _STATE.update(
             {
                 "status": "idle",
-                "version": 2,
-                "source": "eligible_usdt_closed_1h_top20",
+                "version": 3,
+                "source": "eligible_usdt_closed_1h_top50",
                 "oneHourCandleTime": None,
                 "updatedAt": 0,
                 "symbols": [],
