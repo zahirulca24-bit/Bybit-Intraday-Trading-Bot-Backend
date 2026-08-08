@@ -31,40 +31,14 @@ def _losing_streak(state):
     )
 
 
-def _is_authoritative_entry_safety_candidate(state):
-    """Identify the canonical closed-5M -> Step-7 automatic entry contract."""
-    return bool(
-        state.get("riskStatus") == "PENDING_RISK"
-        and state.get("positionSizingStatus") == "NOT_EVALUATED_STEP8"
-        and state.get("orderSubmitted") is False
-    )
-
-
 def signal_risk_policy(state, signal):
-    """Return risk metadata without touching exchange state.
-
-    Canonical automatic candidates have already passed strategy selection,
-    15M classification, grade eligibility, and closed-5M confirmation. For
-    those candidates this helper is intentionally a no-op for strategy quality:
-    it cannot reject on vote count/strength, cannot reduce size, and cannot
-    apply losing-streak sizing. Legacy/manual callers keep the historical policy
-    until those paths are retired separately.
-    """
+    """Return signal-aware risk metadata without touching exchange state."""
     if signal not in ("Buy", "Sell"):
         return {
             "ok": False,
             "reason": "No executable signal",
             "sizeFactor": 0.0,
             "riskFlags": ["no_executable_signal"],
-        }
-
-    if _is_authoritative_entry_safety_candidate(state):
-        return {
-            "ok": True,
-            "reason": "Entry safety candidate; strategy quality already confirmed upstream",
-            "sizeFactor": 1.0,
-            "riskFlags": [],
-            "entrySafetyOnly": True,
         }
 
     router = state.get("router") if isinstance(state.get("router"), dict) else {}
