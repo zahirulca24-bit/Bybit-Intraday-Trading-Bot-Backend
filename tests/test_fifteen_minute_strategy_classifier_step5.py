@@ -65,6 +65,22 @@ class FakeCore:
             "rows": copy.deepcopy(self.rows),
         }
 
+    @staticmethod
+    def simple_atr(highs, lows, closes, period):
+        if len(highs) < period + 1 or len(lows) < period + 1 or len(closes) < period + 1:
+            return None
+        true_ranges = []
+        for index in range(1, len(closes)):
+            true_ranges.append(
+                max(
+                    highs[index] - lows[index],
+                    abs(highs[index] - closes[index - 1]),
+                    abs(lows[index] - closes[index - 1]),
+                )
+            )
+        sample = true_ranges[-period:]
+        return sum(sample) / len(sample) if sample else None
+
     def fetch_candles(self, symbol, interval, limit=80):
         self.fetch_calls.append((symbol, interval, limit))
         if interval != "15":
