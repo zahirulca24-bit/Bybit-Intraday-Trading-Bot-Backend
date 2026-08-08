@@ -4,6 +4,7 @@ import inspect
 
 from backend import execution_command_outbox as outbox
 from backend import fifteen_minute_strategy_classifier as classifier
+from backend import runtime_orchestrator as orchestrator
 from backend.engines.bot_engine import BotEngineV2
 
 
@@ -150,6 +151,17 @@ def test_direct_handoff_failure_retries_without_reclassifying_risk(monkeypatch):
     assert result["nodeHandoff"]["rows"][0]["tradeRejected"] is False
     assert core._risk["approvedRiskQueue"][0]["riskApproved"] is True
     assert core._risk["approvedRiskQueue"][0]["riskStatus"] == "APPROVED_RISK"
+
+
+def test_runtime_invokes_direct_node_handoff_before_python_sizing_diagnostic():
+    source = inspect.getsource(orchestrator.run_due_once)
+    risk_index = source.index("_run_authoritative_entry_risk(core, timestamp)")
+    handoff_index = source.index("_run_execution_command_outbox(core, timestamp)")
+    sizing_index = source.index("_run_position_sizing_margin(core, timestamp)")
+    assert risk_index < handoff_index < sizing_index
+    settings = orchestrator.settings()
+    assert settings["executionCommandPublishCadence"] == "IMMEDIATELY_AFTER_AUTHORITATIVE_RISK_APPROVAL"
+    assert settings["positionSizingCadence"] == "DIAGNOSTIC_AFTER_DIRECT_NODE_HANDOFF"
 
 
 def test_closed_15m_classifier_processes_all_50_current_watchlist_rows(monkeypatch):
