@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { evaluateFirstTradeGate, assertFirstTradeCandidate } from '../src/firstTradeGate.js';
+import { orderLinkId } from '../src/bybitClient.js';
 
 function config(overrides = {}) {
   return {
@@ -22,6 +24,15 @@ function bybit({ positions = [], orders = [] } = {}) {
 function repository(active = []) {
   return {
     pool: { query: async () => ({ rows: active }) },
+  };
+}
+
+function activeCommand(overrides = {}) {
+  return {
+    candidateKey: 'BTCUSDT:recovery:1',
+    state: 'MANAGING',
+    payload: { symbol: 'BTCUSDT', side: 'Buy' },
+    ...overrides,
   };
 }
 
@@ -56,16 +67,77 @@ test('gate rejects an invalid grade-risk configuration', async () => {
   assert.match(result.reasons.join(' '), /A\+=1\.00%, A=1\.00%, B\+=reject/);
 });
 
-test('open exchange truth or unresolved database command blocks activation', async () => {
+test('legitimate adopted command and matching exchange position are restart-recoverable', async () => {
+  const command = activeCommand();
   const result = await evaluateFirstTradeGate({
-    bybit: bybit({ positions: [{ size: '0.01' }], orders: [{ orderStatus: 'New' }] }),
-    repository: repository([{ candidate_key: 'existing', state: 'ORDER_PENDING' }]),
+    bybit: bybit({ positions: [{ symbol: 'BTCUSDT', side: 'Buy', size: '0.01' }] }),
+    repository: repository(),
     config: config(),
+    adoptedCommands: [command],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.recoveryMode, true);
+  assert.equal(result.activeCommandCount, 1);
+  assert.equal(result.managedPositionCount, 1);
+  assert.equal(result.orphanPositionCount, 0);
+});
+
+test('legitimate adopted command and matching linked order are restart-recoverable', async () => {
+  const command = activeCommand({ state: 'ORDER_PENDING' });
+  const result = await evaluateFirstTradeGate({
+    bybit: bybit({ orders: [{ symbol: 'BTCUSDT', side: 'Buy', orderStatus: 'New', orderLinkId: orderLinkId(command.candidateKey) }] }),
+    repository: repository(),
+    config: config(),
+    adoptedCommands: [command],
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.managedOrderCount, 1);
+  assert.equal(result.orphanOrderCount, 0);
+});
+
+test('orphan exchange position still blocks restart recovery', async () => {
+  const result = await evaluateFirstTradeGate({
+    bybit: bybit({ positions: [{ symbol: 'ETHUSDT', side: 'Sell', size: '0.5' }] }),
+    repository: repository(),
+    config: config(),
+    adoptedCommands: [activeCommand()],
   });
   assert.equal(result.ok, false);
-  assert.equal(result.openPositionCount, 1);
-  assert.equal(result.openOrderCount, 1);
-  assert.equal(result.activeCommandCount, 1);
+  assert.equal(result.orphanPositionCount, 1);
+  assert.match(result.reasons.join(' '), /orphan open position/);
+});
+
+test('orphan exchange order still blocks restart recovery', async () => {
+  const result = await evaluateFirstTradeGate({
+    bybit: bybit({ orders: [{ symbol: 'ETHUSDT', side: 'Buy', orderStatus: 'New', orderLinkId: 'manual-order' }] }),
+    repository: repository(),
+    config: config(),
+    adoptedCommands: [activeCommand()],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.orphanOrderCount, 1);
+  assert.match(result.reasons.join(' '), /orphan open order/);
+});
+
+test('more than three recovered active commands blocks activation', async () => {
+  const commands = [1, 2, 3, 4].map((index) => activeCommand({ candidateKey: `BTCUSDT:recovery:${index}` }));
+  const result = await evaluateFirstTradeGate({
+    bybit: bybit(),
+    repository: repository(),
+    config: config(),
+    adoptedCommands: commands,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.reasons.join(' '), /maximum is 3/);
+});
+
+test('coordinator adopts recovery commands before evaluating startup preflight', () => {
+  const source = fs.readFileSync(new URL('../src/index.js', import.meta.url), 'utf8');
+  const adoptIndex = source.indexOf('repository.adoptActiveCommands(config.ownerId)');
+  const gateIndex = source.indexOf('evaluateFirstTradeGate({ bybit, repository, config, adoptedCommands: adopted })');
+  assert.notEqual(adoptIndex, -1);
+  assert.notEqual(gateIndex, -1);
+  assert.ok(adoptIndex < gateIndex, 'active-command adoption must happen before startup preflight');
 });
 
 test('A+ candidate accepts up to 1.00 percent effective risk', () => {
