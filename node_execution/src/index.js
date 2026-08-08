@@ -173,11 +173,14 @@ async function coordinator() {
         continue;
       }
 
-      const adopted = await repository.adoptActiveCommands(config.ownerId);
-      const active = await repository.activeCommands();
-      if (active.length > config.maxActiveTrades) throw new Error(`Execution permits at most ${config.maxActiveTrades} active candidates.`);
+      // Keep restart adoption before preflight. The `adopted` set below is the
+      // unified active set after PostgreSQL adoption, so direct and support
+      // inputs are reconciled by the same startup gate and slot controller.
+      const postgresAdopted = await repository.adoptActiveCommands(config.ownerId);
+      const adopted = await repository.activeCommands();
+      if (adopted.length > config.maxActiveTrades) throw new Error(`Execution permits at most ${config.maxActiveTrades} active candidates.`);
 
-      runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config, adoptedCommands: active });
+      runtime.firstTradeGate = await evaluateFirstTradeGate({ bybit, repository, config, adoptedCommands: adopted });
       runtime.recoveryRequired = runtime.firstTradeGate.recoveryCode === 'RECONCILIATION_REQUIRED';
       runtime.recoveryStatus = runtime.firstTradeGate.recoveryStatus;
       if (!runtime.firstTradeGate.ok) {
@@ -201,8 +204,8 @@ async function coordinator() {
         gradeRiskPct: config.gradeRiskPct,
         maxActiveTrades: config.maxActiveTrades,
         databaseSupport: runtime.postgresSupport.status,
-        recoveredActiveCandidates: active.length,
-        recoveredPostgresCommands: adopted.length,
+        recoveredActiveCandidates: adopted.length,
+        recoveredPostgresCommands: postgresAdopted.length,
       }));
       await Promise.all([1, 2, 3].map((slotId) => slotLoop(slotId)));
 
