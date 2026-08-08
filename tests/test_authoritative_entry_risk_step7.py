@@ -149,11 +149,12 @@ def test_valid_confirmed_a_candidate_is_approved():
 def test_approved_candidate_always_has_full_risk_size_factor():
     core = CoreStub()
 
-    _, approved = _approved(core)
+    result, approved = _approved(core)
 
     assert approved["riskSizeFactor"] == 1.0
     assert approved["riskFlags"] == []
-    assert approved["riskDecision"]["checks"]["signalRisk"]["entrySafetyOnly"] is True
+    assert "signalRisk" not in approved["riskDecision"]["checks"]
+    assert result["metrics"]["signalRiskChecks"] == 0
 
 
 def test_one_matching_strategy_vote_does_not_reject_entry_safety():
@@ -394,6 +395,20 @@ def test_invalid_candidate_identity_is_blocked():
     row = result["rows"][0]
     assert row["riskStatus"] == "BLOCKED_RISK"
     assert row["riskDecision"]["code"] == "INVALID_CONFIRMED_ENTRY"
+    assert result["approvedRiskQueueSize"] == 0
+
+
+def test_candidate_not_marked_as_confirmed_step7_input_is_blocked():
+    core = CoreStub()
+    core.entry_snapshot = entry_snapshot(candidate(riskStatus="WAITING_5M_CONFIRMATION"))
+    risk.install(core)
+
+    result = risk.build(core, now=4000)
+
+    row = result["rows"][0]
+    assert row["riskStatus"] == "BLOCKED_RISK"
+    assert row["riskDecision"]["code"] == "INVALID_CONFIRMED_ENTRY"
+    assert row["riskDecision"]["checks"]["confirmedEntry"]["ok"] is False
     assert result["approvedRiskQueueSize"] == 0
 
 
